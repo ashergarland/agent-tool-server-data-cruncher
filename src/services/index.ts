@@ -1,14 +1,10 @@
 import type { AppConfig } from '../config/index.js';
-import type { ExampleProvider } from '../provider/types.js';
-import { Guardrails } from './guardrails.js';
-import { ItemService } from './items.js';
+import { DataCruncherService } from './data-cruncher.js';
 
 export interface Services {
-  readonly items: ItemService;
-  readonly guardrails: Guardrails;
+  readonly dataCruncher: DataCruncherService;
 }
 
-export const createServices = (config: AppConfig, provider: ExampleProvider): Services => {
-  const guardrails = new Guardrails(config);
-  return { guardrails, items: new ItemService(provider, guardrails) };
-};
+export const createServices = (config: AppConfig): Services => ({
+  dataCruncher: new DataCruncherService(config.data.root),
+});

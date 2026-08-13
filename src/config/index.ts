@@ -34,6 +34,7 @@ export const envSchema = z.object({
   SERVICE_VERSION: z.string().min(1).default('0.0.0-dev'),
   GIT_SHA: z.string().default('unknown'),
   PUBLIC_BASE_URL: z.url().optional(),
+  DATA_ROOT: z.string().min(1).default('.'),
   RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(120),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
   AUTH_MODE: z.enum(['api-key', 'disabled']).default('api-key'),
@@ -59,6 +60,9 @@ export interface AppConfig {
     readonly rateLimit: { readonly max: number; readonly windowMs: number };
   };
   readonly logLevel: Env['LOG_LEVEL'];
+  readonly data: {
+    readonly root: string;
+  };
   readonly auth:
     | { readonly mode: 'disabled' }
     | { readonly mode: 'api-key'; readonly apiKeys: readonly string[] };
@@ -99,6 +103,7 @@ export const buildConfig = (env: Env): AppConfig => {
       rateLimit: { max: env.RATE_LIMIT_MAX, windowMs: env.RATE_LIMIT_WINDOW_MS },
     },
     logLevel: env.LOG_LEVEL,
+    data: { root: env.DATA_ROOT },
     auth:
       env.AUTH_MODE === 'disabled'
         ? { mode: 'disabled' }
