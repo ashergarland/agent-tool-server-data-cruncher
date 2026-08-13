@@ -1,31 +1,59 @@
-import { describe, expect, it } from 'vitest';
-import { createApplication } from '../../src/app.js';
-import { MemoryProvider } from '../../src/provider/memory.js';
-import { createServices } from '../../src/services/index.js';
-import { testConfig } from '../helpers/config.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DataCruncherService } from '../../src/services/data-cruncher.js';
 
-describe('example provider and services', () => {
-  it('lists, retrieves, updates, and rejects unknown items', async () => {
-    const services = createServices(testConfig({ MUTATIONS_ENABLED: true }), new MemoryProvider());
-    expect(await services.items.list()).toHaveLength(1);
-    expect((await services.items.get('example-1')).status).toBe('pending');
-    expect(
-      await services.items.updateStatus({
-        id: 'example-1',
-        status: 'complete',
-        confirm: true,
-        dryRun: false,
-      }),
-    ).toMatchObject({ performed: true, dryRun: false, item: { status: 'complete' } });
-    await expect(services.items.get('missing')).rejects.toMatchObject({ code: 'not_found' });
+let root: string;
+let service: DataCruncherService;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'data-cruncher-'));
+  service = new DataCruncherService(root);
+});
+
+afterEach(async () => rm(root, { recursive: true, force: true }));
+
+describe('data cruncher service', () => {
+  it('queries JSON with jq', async () => {
+    await writeFile(
+      join(root, 'users.json'),
+      JSON.stringify({ users: [{ email: 'one@example.com' }, { email: 'two@example.com' }] }),
+    );
+
+    expect(await service.queryJson('users.json', '.users[].email')).toBe(
+      '"one@example.com"\n"two@example.com"',
+    );
   });
 
-  it('wires an injectable application', async () => {
-    const application = createApplication({
-      config: testConfig(),
-      provider: new MemoryProvider(),
+  it('returns ripgrep matches and line numbers', async () => {
+    await writeFile(join(root, 'app.log'), 'INFO started\nERROR first\nWARN retry\nERROR second\n');
+
+    expect(await service.ripgrep('app.log', '^ERROR', 10)).toEqual([
+      { lineNumber: 2, line: 'ERROR first' },
+      { lineNumber: 4, line: 'ERROR second' },
+    ]);
+    expect(await service.ripgrep('app.log', 'missing', 10)).toEqual([]);
+  });
+
+  it('rejects paths outside the configured data root', async () => {
+    await expect(service.queryJson('/etc/passwd', '.')).rejects.toMatchObject({
+      code: 'bad_request',
     });
-    expect(application.registry.list()).toHaveLength(3);
-    await application.http.close();
+    await expect(service.ripgrep('../outside.log', '.', 10)).rejects.toMatchObject({
+      code: 'bad_request',
+    });
+  });
+
+  it('maps invalid filters and patterns to bad requests', async () => {
+    await writeFile(join(root, 'data.json'), '{}');
+    await writeFile(join(root, 'app.log'), 'line\n');
+
+    await expect(service.queryJson('data.json', '.[')).rejects.toMatchObject({
+      code: 'bad_request',
+    });
+    await expect(service.ripgrep('app.log', '[', 10)).rejects.toMatchObject({
+      code: 'bad_request',
+    });
   });
 });

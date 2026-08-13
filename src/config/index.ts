@@ -11,15 +11,6 @@ const csv = z
   .pipe(z.array(z.string().min(1)))
   .catch([] as string[]);
 
-const booleanish = z.union([z.boolean(), z.string()]).transform((value, context) => {
-  if (typeof value === 'boolean') return value;
-  const normalized = value.trim().toLowerCase();
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-  context.addIssue({ code: 'custom', message: 'Expected a boolean value' });
-  return z.NEVER;
-});
-
 export const withoutBlankValues = (source: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
   Object.fromEntries(
     Object.entries(source).filter(([, value]) => value === undefined || value.trim() !== ''),
@@ -30,7 +21,7 @@ export const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
   HOST: z.string().min(1).default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  SERVICE_NAME: z.string().min(1).default('agent-tool-server-template'),
+  SERVICE_NAME: z.string().min(1).default('agent-tool-server-data-cruncher'),
   SERVICE_VERSION: z.string().min(1).default('0.0.0-dev'),
   GIT_SHA: z.string().default('unknown'),
   PUBLIC_BASE_URL: z.url().optional(),
@@ -39,8 +30,6 @@ export const envSchema = z.object({
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
   AUTH_MODE: z.enum(['api-key', 'disabled']).default('api-key'),
   API_KEYS: csv.default([]),
-  MUTATIONS_ENABLED: booleanish.default(false),
-  MUTATION_CONFIRMATION_REQUIRED: booleanish.default(true),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -66,10 +55,6 @@ export interface AppConfig {
   readonly auth:
     | { readonly mode: 'disabled' }
     | { readonly mode: 'api-key'; readonly apiKeys: readonly string[] };
-  readonly guardrails: {
-    readonly mutationsEnabled: boolean;
-    readonly confirmationRequired: boolean;
-  };
 }
 
 export class ConfigurationError extends Error {
@@ -108,10 +93,6 @@ export const buildConfig = (env: Env): AppConfig => {
       env.AUTH_MODE === 'disabled'
         ? { mode: 'disabled' }
         : { mode: 'api-key', apiKeys: env.API_KEYS },
-    guardrails: {
-      mutationsEnabled: env.MUTATIONS_ENABLED,
-      confirmationRequired: env.MUTATION_CONFIRMATION_REQUIRED,
-    },
   };
 };
 

@@ -2,7 +2,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMcpServer } from '../../src/mcp/server.js';
-import { MemoryProvider } from '../../src/provider/memory.js';
 import { createServices } from '../../src/services/index.js';
 import { createToolRegistry } from '../../src/tools/registry.js';
 import { testConfig } from '../helpers/config.js';
@@ -17,7 +16,7 @@ describe('MCP adapter', () => {
     const server = createMcpServer(
       config,
       createToolRegistry(),
-      createServices(config, new MemoryProvider()),
+      createServices(config),
       { requestId: 'mcp-test', principal: 'test-client' },
     );
     const client = new Client({ name: 'test-client', version: '1.0.0' });
@@ -26,13 +25,8 @@ describe('MCP adapter', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
     const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toContain('example_list_items');
-    const result = await client.callTool({
-      name: 'example_get_item',
-      arguments: { id: 'example-1' },
-    });
-    expect(result.isError).not.toBe(true);
-    const failure = await client.callTool({ name: 'example_get_item', arguments: {} });
+    expect(tools.tools.map((tool) => tool.name)).toEqual(['query_json_jq', 'ripgrep_search']);
+    const failure = await client.callTool({ name: 'query_json_jq', arguments: {} });
     expect(failure.isError).toBe(true);
   });
 });

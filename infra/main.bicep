@@ -15,7 +15,6 @@ param containerImage string = 'replace.invalid/agent-tool-server:replace-me'
 param deployApp bool = false
 
 @description('Enable state-changing tools at the process boundary.')
-param mutationsEnabled bool = false
 
 @description('Existing Key Vault secret name used by the application.')
 param apiKeySecretName string = 'tool-server-api-key'
@@ -102,7 +101,6 @@ module app 'modules/container-app.bicep' = if (deployApp) {
     logAnalyticsCustomerId: observability.outputs.workspaceCustomerId
     logAnalyticsSharedKey: observability.outputs.workspaceSharedKey
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
-    mutationsEnabled: mutationsEnabled
     minReplicas: minReplicas
     maxReplicas: maxReplicas
     tags: resourceGroup.tags
