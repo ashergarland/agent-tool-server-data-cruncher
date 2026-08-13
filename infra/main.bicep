@@ -28,6 +28,9 @@ param minReplicas int = 0
 @minValue(1)
 param maxReplicas int = 3
 
+@description('Path in the container image containing files that the data tools may query.')
+param dataRoot string = '/data'
+
 var suffix = uniqueString(subscription().id, environmentName)
 var resourceGroupName = 'rg-ats-${environmentName}-${suffix}'
 
@@ -101,6 +104,7 @@ module app 'modules/container-app.bicep' = if (deployApp) {
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
     minReplicas: minReplicas
     maxReplicas: maxReplicas
+    dataRoot: dataRoot
     tags: resourceGroup.tags
   }
 }

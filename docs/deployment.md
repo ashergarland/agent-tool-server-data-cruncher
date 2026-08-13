@@ -31,6 +31,10 @@ The script:
 The first pass prevents Container Apps from repeatedly starting with a missing Key Vault secret.
 The second pass adds the app, probes, scale rules, and monitoring after its prerequisites exist.
 
+Set `DATA_ROOT` before provisioning to the path in the container image that holds the files to
+query; it defaults to `/data`. The standard image does not include input files, so build a
+deployment image that includes them at that path or use your own Container Apps storage setup.
+
 For automation, set `API_KEY` in the job's protected secret environment and set `IMAGE_TAG` to an
 immutable commit SHA. Do not use `latest` for production releases.
 

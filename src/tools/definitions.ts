@@ -57,7 +57,7 @@ export const ripgrepSearchTool = defineTool({
   title: 'Search a file with ripgrep',
   summary: 'Find regular-expression matches in a local text file.',
   description:
-    'Runs ripgrep against a file inside the configured data root and returns matching lines with one-based line numbers.',
+    'Runs ripgrep against a file inside the configured data root and returns matching lines with one-based line numbers. matchCount is the number of returned matches, limited by maxResults.',
   kind: 'read',
   inputSchema: z.object({
     filePath: z.string().min(1).max(4096),

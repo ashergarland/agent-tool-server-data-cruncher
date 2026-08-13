@@ -12,6 +12,7 @@ param logAnalyticsSharedKey string
 param applicationInsightsConnectionString string
 param minReplicas int
 param maxReplicas int
+param dataRoot string
 param tags object
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -87,7 +88,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               name: 'DATA_ROOT'
-              value: '/data'
+              value: dataRoot
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'

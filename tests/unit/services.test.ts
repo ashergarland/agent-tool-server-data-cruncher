@@ -24,6 +24,7 @@ describe('data cruncher service', () => {
     expect(await service.queryJson('users.json', '.users[].email')).toBe(
       '"one@example.com"\n"two@example.com"',
     );
+    expect(await service.queryJson('users.json', '-1')).toBe('-1');
   });
 
   it('returns ripgrep matches and line numbers', async () => {

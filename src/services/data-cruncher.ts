@@ -43,7 +43,7 @@ export class DataCruncherService {
   public async queryJson(filePath: string, filter: string): Promise<string> {
     const file = await this.readableFile(filePath);
     try {
-      const { stdout } = await execute('jq', ['--compact-output', filter, file], {
+      const { stdout } = await execute('jq', ['--compact-output', '--', filter, file], {
         encoding: 'utf8',
         maxBuffer: maxOutputBytes,
         timeout: commandTimeoutMs,
