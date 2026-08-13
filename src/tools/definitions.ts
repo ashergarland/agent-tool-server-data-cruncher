@@ -74,8 +74,11 @@ export const ripgrepSearchTool = defineTool({
       input.pattern,
       input.maxResults,
     );
-    return { matches, matchCount: matches.length };
+    return { matches: [...matches], matchCount: matches.length };
   },
 });
 
-export const toolDefinitions = [queryJsonJqTool, ripgrepSearchTool] as const satisfies readonly ToolDefinition[];
+export const toolDefinitions = [
+  queryJsonJqTool,
+  ripgrepSearchTool,
+] as const satisfies readonly ToolDefinition[];

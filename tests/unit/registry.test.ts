@@ -11,10 +11,7 @@ const context = { requestId: 'test', principal: 'tester' };
 describe('tool registry', () => {
   it('exposes unique definitions and schemas', () => {
     const registry = createToolRegistry();
-    expect(registry.list().map((tool) => tool.name)).toEqual([
-      'query_json_jq',
-      'ripgrep_search',
-    ]);
+    expect(registry.list().map((tool) => tool.name)).toEqual(['query_json_jq', 'ripgrep_search']);
     expect(registry.list().every((tool) => tool.inputJsonSchema['type'] === 'object')).toBe(true);
   });
 

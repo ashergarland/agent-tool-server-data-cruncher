@@ -123,7 +123,7 @@ describe('HTTP API', () => {
       payload: {},
     });
     expect(invalid.statusCode).toBe(400);
-    expect(invalid.json().error.details.issues).toHaveLength(1);
+    expect(invalid.json().error.details.issues).toHaveLength(2);
   });
 
   it('rate limits principals', async () => {

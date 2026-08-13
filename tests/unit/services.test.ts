@@ -43,6 +43,9 @@ describe('data cruncher service', () => {
     await expect(service.ripgrep('../outside.log', '.', 10)).rejects.toMatchObject({
       code: 'bad_request',
     });
+    await expect(service.queryJson('.', '.')).rejects.toMatchObject({
+      code: 'bad_request',
+    });
   });
 
   it('maps invalid filters and patterns to bad requests', async () => {
