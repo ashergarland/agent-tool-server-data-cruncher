@@ -8,15 +8,14 @@ import {
 } from '../../src/config/index.js';
 
 describe('configuration', () => {
-  it('normalizes booleans and ignores blank optional values', () => {
+  it('ignores blank optional values', () => {
     const config = loadConfig({
       NODE_ENV: 'test',
       AUTH_MODE: 'api-key',
       API_KEYS: '12345678901234567890123456789012',
-      MUTATIONS_ENABLED: 'True',
       PUBLIC_BASE_URL: '',
     });
-    expect(config.guardrails.mutationsEnabled).toBe(true);
+    expect(config.data.root).toBe('.');
     expect(config.service.publicBaseUrl).toBeUndefined();
     expect(withoutBlankValues({ A: '', B: 'x' })).toEqual({ B: 'x' });
   });

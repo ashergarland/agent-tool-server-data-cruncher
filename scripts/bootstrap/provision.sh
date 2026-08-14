@@ -6,6 +6,7 @@ LOCATION="${2:-eastus}"
 DEPLOYMENT_NAME="ats-${ENVIRONMENT_NAME}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 SECRET_NAME="tool-server-api-key"
+DATA_ROOT="${DATA_ROOT:-/data}"
 BOOTSTRAP_PRINCIPAL_OBJECT_ID="$(az ad signed-in-user show --query id -o tsv)"
 
 az bicep build --file infra/main.bicep >/dev/null
@@ -65,4 +66,5 @@ az deployment sub create \
     deployApp=true \
     bootstrapPrincipalObjectId="$BOOTSTRAP_PRINCIPAL_OBJECT_ID" \
     containerImage="${REGISTRY_SERVER}/agent-tool-server:${IMAGE_TAG}" \
+    dataRoot="$DATA_ROOT" \
   --only-show-errors

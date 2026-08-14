@@ -10,9 +10,9 @@ param logAnalyticsCustomerId string
 param logAnalyticsSharedKey string
 @secure()
 param applicationInsightsConnectionString string
-param mutationsEnabled bool
 param minReplicas int
 param maxReplicas int
+param dataRoot string
 param tags object
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -87,8 +87,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
               secretRef: 'api-key'
             }
             {
-              name: 'MUTATIONS_ENABLED'
-              value: string(mutationsEnabled)
+              name: 'DATA_ROOT'
+              value: dataRoot
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'

@@ -1,6 +1,6 @@
 {
-  "id": "agent-tool-server-template",
-  "repository": "https://github.com/ashergarland/agent-tool-server-template",
+  "id": "agent-tool-server-data-cruncher",
+  "repository": "https://github.com/ashergarland/agent-tool-server-data-cruncher",
   "serverMetadata": "server.json",
-  "categories": ["developer-tools", "replace-me"]
+  "categories": ["developer-tools", "data"]
 }

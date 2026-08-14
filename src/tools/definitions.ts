@@ -30,52 +30,55 @@ export const defineTool = <InputSchema extends z.ZodType, OutputSchema extends z
   definition: ToolDefinition<InputSchema, OutputSchema>,
 ): ToolDefinition<InputSchema, OutputSchema> => definition;
 
-const itemSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  status: z.enum(['pending', 'complete']),
-});
-
-export const listItemsTool = defineTool({
-  name: 'example_list_items',
-  title: 'List example items',
-  summary: 'List items from the replaceable example provider.',
-  description: 'Demonstrates a read-only tool crossing tool, service, and provider boundaries.',
+export const queryJsonJqTool = defineTool({
+  name: 'query_json_jq',
+  title: 'Query JSON with jq',
+  summary: 'Apply a jq filter to a local JSON file.',
+  description:
+    'Runs jq against a JSON file inside the configured data root and returns only the filtered output.',
   kind: 'read',
-  inputSchema: z.object({}),
-  outputSchema: z.object({ items: z.array(itemSchema) }),
-  handler: async (_input, services) => ({ items: [...(await services.items.list())] }),
-});
-
-export const getItemTool = defineTool({
-  name: 'example_get_item',
-  title: 'Get an example item',
-  summary: 'Get one item by identifier.',
-  description: 'Demonstrates validated input and safe not-found error mapping.',
-  kind: 'read',
-  inputSchema: z.object({ id: z.string().min(1).max(100) }),
-  outputSchema: z.object({ item: itemSchema }),
-  handler: async (input, services) => ({ item: await services.items.get(input.id) }),
-});
-
-export const updateItemTool = defineTool({
-  name: 'example_update_item',
-  title: 'Update an example item',
-  summary: 'Preview or update an item status.',
-  description: 'Demonstrates dry-run and explicit-confirmation mutation guardrails.',
-  kind: 'write',
   inputSchema: z.object({
-    id: z.string().min(1).max(100),
-    status: z.enum(['pending', 'complete']),
-    dryRun: z.boolean().default(false),
-    confirm: z.boolean().default(false),
+    filePath: z.string().min(1).max(4096),
+    filter: z.string().min(1).max(10_000),
   }),
-  outputSchema: z.object({ item: itemSchema, performed: z.boolean(), dryRun: z.boolean() }),
-  handler: (input, services) => services.items.updateStatus(input),
+  outputSchema: z.object({ output: z.string() }),
+  handler: async (input, services) => ({
+    output: await services.dataCruncher.queryJson(input.filePath, input.filter),
+  }),
+});
+
+const ripgrepMatchSchema = z.object({
+  lineNumber: z.number().int().positive(),
+  line: z.string(),
+});
+
+export const ripgrepSearchTool = defineTool({
+  name: 'ripgrep_search',
+  title: 'Search a file with ripgrep',
+  summary: 'Find regular-expression matches in a local text file.',
+  description:
+    'Runs ripgrep against a file inside the configured data root and returns matching lines with one-based line numbers. matchCount is the number of returned matches, limited by maxResults.',
+  kind: 'read',
+  inputSchema: z.object({
+    filePath: z.string().min(1).max(4096),
+    pattern: z.string().min(1).max(10_000),
+    maxResults: z.number().int().min(1).max(1000).default(100),
+  }),
+  outputSchema: z.object({
+    matches: z.array(ripgrepMatchSchema),
+    matchCount: z.number().int().nonnegative(),
+  }),
+  handler: async (input, services) => {
+    const matches = await services.dataCruncher.ripgrep(
+      input.filePath,
+      input.pattern,
+      input.maxResults,
+    );
+    return { matches: [...matches], matchCount: matches.length };
+  },
 });
 
 export const toolDefinitions = [
-  listItemsTool,
-  getItemTool,
-  updateItemTool,
+  queryJsonJqTool,
+  ripgrepSearchTool,
 ] as const satisfies readonly ToolDefinition[];

@@ -10,6 +10,7 @@ RUN npm run build \
   && npm cache clean --force
 
 FROM node:22-alpine AS runtime
+RUN apk add --no-cache jq ripgrep
 ARG GIT_SHA=unknown
 ARG SERVICE_VERSION=0.0.0-dev
 ENV NODE_ENV=production \
@@ -18,11 +19,13 @@ ENV NODE_ENV=production \
     GIT_SHA=${GIT_SHA} \
     SERVICE_VERSION=${SERVICE_VERSION}
 WORKDIR /app
+RUN mkdir /data && chown node:node /data
 
 COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
 COPY --from=build --chown=node:node /workspace/dist ./dist
 COPY --chown=node:node package.json ./
 
+ENV DATA_ROOT=/data
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

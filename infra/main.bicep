@@ -14,9 +14,6 @@ param containerImage string = 'replace.invalid/agent-tool-server:replace-me'
 @description('False for the prerequisite pass; true only after the Key Vault secret and image exist.')
 param deployApp bool = false
 
-@description('Enable state-changing tools at the process boundary.')
-param mutationsEnabled bool = false
-
 @description('Existing Key Vault secret name used by the application.')
 param apiKeySecretName string = 'tool-server-api-key'
 
@@ -30,6 +27,9 @@ param minReplicas int = 0
 @description('Maximum replicas.')
 @minValue(1)
 param maxReplicas int = 3
+
+@description('Path in the container image containing files that the data tools may query.')
+param dataRoot string = '/data'
 
 var suffix = uniqueString(subscription().id, environmentName)
 var resourceGroupName = 'rg-ats-${environmentName}-${suffix}'
@@ -102,9 +102,9 @@ module app 'modules/container-app.bicep' = if (deployApp) {
     logAnalyticsCustomerId: observability.outputs.workspaceCustomerId
     logAnalyticsSharedKey: observability.outputs.workspaceSharedKey
     applicationInsightsConnectionString: observability.outputs.applicationInsightsConnectionString
-    mutationsEnabled: mutationsEnabled
     minReplicas: minReplicas
     maxReplicas: maxReplicas
+    dataRoot: dataRoot
     tags: resourceGroup.tags
   }
 }

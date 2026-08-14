@@ -83,9 +83,8 @@ export const createHttpServer = ({
     environment: config.env,
     capabilities: {
       transports: ['stdio', 'streamable-http', 'http-openapi'],
-      mutationsEnabled: config.guardrails.mutationsEnabled,
-      confirmationRequired: config.guardrails.confirmationRequired,
       authMode: config.auth.mode,
+      tools: registry.list().map((tool) => tool.name),
     },
   }));
 
