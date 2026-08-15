@@ -21,7 +21,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: sudo apt-get install --yes ripgrep
+      - name: Install jq and ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep
+      - name: Record tooling versions
+        run: |
+          jq --version
+          rg --version | head -n1
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
@@ -45,23 +52,51 @@ jobs:
           context: .
           load: true
           push: false
-          tags: agent-tool-server-template:test
-      - name: Smoke test
+          tags: agent-tool-server-data-cruncher:test
+      - name: Smoke test a read-only non-root container
         run: |
           set -euo pipefail
           API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
           docker run --rm -d --name tool-server -p 8080:8080 \
-            -e API_KEYS="$API_KEY" agent-tool-server-template:test
+            --read-only --tmpfs /tmp:rw,mode=1777,size=128m \
+            -e API_KEYS="$API_KEY" -e LOCAL_PATHS_ENABLED=true \
+            agent-tool-server-data-cruncher:test
           trap 'docker logs tool-server; docker stop tool-server' EXIT
           for attempt in {1..30}; do
             curl --fail --silent http://127.0.0.1:8080/health && break
             sleep 1
           done
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8080/ready && break
+            sleep 1
+          done
           curl --fail --silent http://127.0.0.1:8080/version
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:8080/tools)" = 401
-          curl --fail --silent -H "x-api-key: $API_KEY" http://127.0.0.1:8080/tools
+          curl --fail --silent -H "x-api-key: $API_KEY" http://127.0.0.1:8080/tools > /dev/null
           test "$(docker inspect --format '{{.Config.User}}' tool-server)" = node
+      - name: Refuse to start without local paths or an asset store
+        run: |
+          set -euo pipefail
+          API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
+          # The image must not bake in LOCAL_PATHS_ENABLED: production has to fail fast when
+          # neither local paths nor an asset store are configured.
+          if output=$(docker run --rm -e API_KEYS="$API_KEY" \
+            agent-tool-server-data-cruncher:test 2>&1); then
+            echo "Expected the container to exit non-zero; it started instead:"
+            echo "$output"
+            exit 1
+          fi
+          echo "$output" | grep -q 'asset store or explicitly enabled local paths'
+      - name: Verify the image reports supported jq and ripgrep versions
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh agent-tool-server-data-cruncher:test -c '
+            set -e
+            cat /etc/data-cruncher-tooling
+            jq --version | grep -Eq "^jq-(1\.[7-9]|1\.[1-9][0-9]|[2-9])"
+            rg --version | head -n1 | grep -Eq "^ripgrep (1[4-9]|[2-9][0-9])\."
+          '
 
   bicep:
     runs-on: ubuntu-latest

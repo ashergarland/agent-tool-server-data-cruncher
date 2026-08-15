@@ -4,7 +4,7 @@ import { AppError } from '../../src/errors.js';
 import { createServices } from '../../src/services/index.js';
 import { defineTool } from '../../src/tools/definitions.js';
 import { createToolRegistry, ToolRegistry } from '../../src/tools/registry.js';
-import { testConfig } from '../helpers/config.js';
+import { testConfig } from '../helpers/harness.js';
 
 const context = { requestId: 'test', principal: 'tester' };
 
