@@ -1,156 +1,326 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import pino from 'pino';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createHttpServer } from '../../src/server/http.js';
-import { createServices } from '../../src/services/index.js';
-import { createToolRegistry } from '../../src/tools/registry.js';
-import { testConfig } from '../helpers/config.js';
+import { FakeAssetStore } from '../helpers/fake-asset-store.js';
+import { apiKey, createHarness, type Harness } from '../helpers/harness.js';
 
-const servers: ReturnType<typeof createHttpServer>[] = [];
-const apiKey = 'test-api-key-that-is-at-least-32-characters';
-let dataRoot: string;
+const harnesses: Harness[] = [];
+let assets: FakeAssetStore;
+let harness: Harness;
 
-const server = (overrides: Record<string, unknown> = {}) => {
-  const config = testConfig({ DATA_ROOT: dataRoot, ...overrides });
-  const app = createHttpServer({
-    config,
-    logger: pino({ level: 'silent' }),
-    services: createServices(config),
-    registry: createToolRegistry(),
-  });
-  servers.push(app);
-  return app;
+const auth = { 'x-api-key': apiKey };
+
+const build = async (env: Record<string, unknown> = {}): Promise<Harness> => {
+  const created = await createHarness({ env, assetStore: assets });
+  harnesses.push(created);
+  return created;
 };
 
 beforeEach(async () => {
-  dataRoot = await mkdtemp(join(tmpdir(), 'data-cruncher-http-'));
+  assets = new FakeAssetStore();
+  harness = await build();
 });
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((app) => app.close()));
-  await rm(dataRoot, { recursive: true, force: true });
+  await assets.close();
+  await Promise.all(harnesses.splice(0).map((entry) => entry.dispose()));
 });
 
-describe('HTTP API', () => {
-  it('serves public metadata and request IDs', async () => {
-    const response = await server().inject({
+describe('public endpoints', () => {
+  it('serves liveness, version and request ids', async () => {
+    const health = await harness.app.inject({ method: 'GET', url: '/health' });
+    expect(health.statusCode).toBe(200);
+
+    const response = await harness.app.inject({
       method: 'GET',
       url: '/version',
       headers: { 'x-request-id': 'caller-id' },
     });
     expect(response.statusCode).toBe(200);
     expect(response.headers['x-request-id']).toBe('caller-id');
-    expect(response.json().capabilities.transports).toContain('streamable-http');
+    const body = response.json<{
+      capabilities: { transports: string[]; executables: Record<string, string> };
+    }>();
+    expect(body.capabilities.transports).toContain('streamable-http');
+    expect(body.capabilities.executables.jq).toMatch(/^\d+\./);
+    expect(body.capabilities.executables.ripgrep).toMatch(/^\d+\./);
   });
 
+  it('reports readiness separately from liveness', async () => {
+    const ready = await harness.app.inject({ method: 'GET', url: '/ready' });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toMatchObject({ status: 'ready', checks: { assetStore: 'filesystem' } });
+
+    assets.failNext = 'check';
+    const failing = await harness.app.inject({ method: 'GET', url: '/ready' });
+    expect(failing.statusCode).toBe(503);
+    expect(failing.json()).toEqual({ status: 'not_ready' });
+    assets.failNext = undefined;
+
+    harness.runtime.beginDraining();
+    const draining = await harness.app.inject({ method: 'GET', url: '/ready' });
+    expect(draining.statusCode).toBe(503);
+    expect(draining.json().status).toBe('draining');
+  });
+
+  it('publishes the generated OpenAPI document', async () => {
+    const response = await harness.app.inject({ method: 'GET', url: '/openapi.json' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().paths['/tools/query_json_jq']).toBeDefined();
+    expect(response.json().paths['/assets']).toBeDefined();
+  });
+});
+
+describe('authentication and limits', () => {
   it('authenticates protected routes', async () => {
-    expect((await server().inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
+    expect((await harness.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
     expect(
       (
-        await server().inject({
+        await harness.app.inject({
           method: 'GET',
           url: '/tools',
           headers: { 'x-api-key': 'not-the-configured-key-but-long-enough' },
         })
       ).statusCode,
     ).toBe(401);
-    const response = await server().inject({
-      method: 'GET',
-      url: '/tools',
-      headers: { 'x-api-key': apiKey },
-    });
+
+    const response = await harness.app.inject({ method: 'GET', url: '/tools', headers: auth });
     expect(response.statusCode).toBe(200);
     expect(response.json().tools).toHaveLength(2);
   });
 
-  it('rate limits repeated unauthenticated attempts by client IP', async () => {
-    const app = server({ RATE_LIMIT_MAX: 1 });
-    expect(
-      (
-        await app.inject({
-          method: 'GET',
-          url: '/tools',
-          headers: { 'x-forwarded-for': '192.0.2.1' },
-        })
-      ).statusCode,
-    ).toBe(401);
-    expect(
-      (
-        await app.inject({
-          method: 'GET',
-          url: '/tools',
-          headers: { 'x-forwarded-for': '192.0.2.2' },
-        })
-      ).statusCode,
-    ).toBe(401);
-    expect(
-      (
-        await app.inject({
-          method: 'GET',
-          url: '/tools',
-          headers: { 'x-forwarded-for': '192.0.2.3' },
-        })
-      ).statusCode,
-    ).toBe(429);
-  });
-
   it('supports development-only disabled authentication', async () => {
-    const response = await server({ AUTH_MODE: 'disabled' }).inject({
-      method: 'GET',
-      url: '/tools',
-    });
-    expect(response.statusCode).toBe(200);
+    const open = await build({ AUTH_MODE: 'disabled' });
+    expect((await open.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(200);
   });
 
-  it('invokes tools and maps validation failures', async () => {
-    await writeFile(join(dataRoot, 'data.json'), JSON.stringify({ status: 'ok' }));
-    const app = server();
-    const success = await app.inject({
+  it('applies a pre-authentication abuse limit', async () => {
+    const limited = await build({ PRE_AUTH_RATE_LIMIT_MAX: 2 });
+    expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
+    expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
+    expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(429);
+  });
+
+  it('rate limits authenticated principals', async () => {
+    const limited = await build({ RATE_LIMIT_MAX: 1 });
+    expect(
+      (await limited.app.inject({ method: 'GET', url: '/tools', headers: auth })).statusCode,
+    ).toBe(200);
+    const blocked = await limited.app.inject({ method: 'GET', url: '/tools', headers: auth });
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.json().error.retryable).toBe(true);
+  });
+});
+
+describe('tool invocation', () => {
+  it('invokes tools with a data reference and maps validation failures', async () => {
+    await writeFile(join(harness.dataRoot, 'data.json'), JSON.stringify({ status: 'ok' }));
+
+    const success = await harness.app.inject({
       method: 'POST',
       url: '/tools/query_json_jq',
-      headers: { 'x-api-key': apiKey },
-      payload: { filePath: 'data.json', filter: '.status' },
+      headers: auth,
+      payload: { source: { kind: 'local_path', path: 'data.json' }, filter: '.status' },
     });
     expect(success.statusCode).toBe(200);
-    expect(success.json().result.output).toBe('"ok"');
+    expect(success.json().result).toMatchObject({ output: '"ok"', truncated: false });
 
-    const invalid = await app.inject({
+    const legacy = await harness.app.inject({
       method: 'POST',
       url: '/tools/query_json_jq',
-      headers: { 'x-api-key': apiKey },
+      headers: auth,
+      payload: { filePath: 'data.json', filter: '.status' },
+    });
+    expect(legacy.json().result.output).toBe('"ok"');
+
+    const invalid = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/query_json_jq',
+      headers: auth,
       payload: {},
     });
     expect(invalid.statusCode).toBe(400);
-    expect(invalid.json().error.details.issues).toHaveLength(2);
+    expect(invalid.json().error.details.issues.length).toBeGreaterThan(0);
   });
 
-  it('rate limits principals', async () => {
-    const limited = server({ RATE_LIMIT_MAX: 1 });
-    expect(
-      (
-        await limited.inject({
-          method: 'GET',
-          url: '/tools',
-          headers: { 'x-api-key': apiKey },
-        })
-      ).statusCode,
-    ).toBe(200);
-    expect(
-      (
-        await limited.inject({
-          method: 'GET',
-          url: '/tools',
-          headers: { 'x-api-key': apiKey },
-        })
-      ).statusCode,
-    ).toBe(429);
+  it('returns a safe envelope without paths or stderr', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/query_json_jq',
+      headers: auth,
+      payload: { source: { kind: 'local_path', path: 'missing.json' }, filter: '.' },
+    });
+    expect(response.statusCode).toBe(400);
+    const { error } = response.json<{ error: Record<string, unknown> }>();
+    expect(error).toMatchObject({ code: 'bad_request', retryable: false });
+    expect(JSON.stringify(error)).not.toContain(harness.dataRoot);
   });
 
-  it('publishes the generated OpenAPI document', async () => {
-    const response = await server().inject({ method: 'GET', url: '/openapi.json' });
-    expect(response.statusCode).toBe(200);
-    expect(response.json().paths['/tools/query_json_jq']).toBeDefined();
+  it('reports unknown tools', async () => {
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/nope',
+      headers: auth,
+      payload: {},
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('maps framework failures to client errors', async () => {
+    const malformed = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/query_json_jq',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: '{"filter": ',
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json<{ error: { code: string } }>().error.code).toBe('bad_request');
+
+    const oversized = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/query_json_jq',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: JSON.stringify({ filter: 'x'.repeat(2_000_000) }),
+    });
+    expect(oversized.statusCode).toBe(413);
+    expect(oversized.json<{ error: { code: string } }>().error.code).toBe('payload_too_large');
+  });
+});
+
+describe('assets', () => {
+  interface AssetBody {
+    asset: { assetId: string; filename: string; sizeBytes: number };
+  }
+
+  const upload = (app: Harness['app'], payload: string, headers: Record<string, string> = {}) =>
+    app.inject({
+      method: 'POST',
+      url: '/assets',
+      headers: {
+        ...auth,
+        'content-type': 'application/octet-stream',
+        'x-filename': 'orders.json',
+        ...headers,
+      },
+      payload,
+    });
+
+  it('accepts a streamed upload and uses it as a tool input', async () => {
+    const created = await upload(harness.app, JSON.stringify({ total: 42 }));
+    expect(created.statusCode).toBe(201);
+    const { asset } = created.json<AssetBody>();
+    expect(asset).toMatchObject({ filename: 'orders.json', sizeBytes: 12 });
+    expect(JSON.stringify(asset)).not.toContain(harness.tempDir);
+
+    const result = await harness.app.inject({
+      method: 'POST',
+      url: '/tools/query_json_jq',
+      headers: auth,
+      payload: { source: { kind: 'asset', assetId: asset.assetId }, filter: '.total' },
+    });
+    expect(result.json().result.output).toBe('42');
+  });
+
+  it('lists, inspects and deletes assets for the owning principal only', async () => {
+    const second = 'second-api-key-that-is-at-least-32-characters';
+    const multi = await build({ API_KEYS: `${apiKey},${second}` });
+    const { asset } = (await upload(multi.app, '{}')).json<AssetBody>();
+
+    const listed = await multi.app.inject({ method: 'GET', url: '/assets', headers: auth });
+    expect(listed.json().assets).toHaveLength(1);
+
+    const inspected = await multi.app.inject({
+      method: 'GET',
+      url: `/assets/${asset.assetId}`,
+      headers: auth,
+    });
+    expect(inspected.json().asset.assetId).toBe(asset.assetId);
+
+    const foreign = await multi.app.inject({
+      method: 'GET',
+      url: `/assets/${asset.assetId}`,
+      headers: { 'x-api-key': second },
+    });
+    expect(foreign.statusCode).toBe(400);
+    expect(
+      (
+        await multi.app.inject({ method: 'GET', url: '/assets', headers: { 'x-api-key': second } })
+      ).json().assets,
+    ).toEqual([]);
+
+    const deleted = await multi.app.inject({
+      method: 'DELETE',
+      url: `/assets/${asset.assetId}`,
+      headers: auth,
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(
+      (await multi.app.inject({ method: 'GET', url: '/assets', headers: auth })).json().assets,
+    ).toEqual([]);
+  });
+
+  it('requires authentication and rejects oversized or unknown assets', async () => {
+    const anonymous = await harness.app.inject({
+      method: 'POST',
+      url: '/assets',
+      headers: { 'content-type': 'application/octet-stream' },
+      payload: '{}',
+    });
+    expect(anonymous.statusCode).toBe(401);
+
+    const bounded = await build({ ASSET_MAX_BYTES: 1024 });
+    const tooLarge = await upload(bounded.app, 'x'.repeat(2048));
+    expect(tooLarge.statusCode).toBe(413);
+    expect(tooLarge.json().error.code).toBe('payload_too_large');
+
+    const unknown = await harness.app.inject({
+      method: 'GET',
+      url: '/assets/not-a-valid-id',
+      headers: auth,
+    });
+    expect(unknown.statusCode).toBe(400);
+  });
+
+  it('surfaces storage failures as safe errors', async () => {
+    assets.failNext = 'put';
+    const response = await upload(harness.app, '{}');
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error.code).toBe('upstream_error');
+    assets.failNext = undefined;
+  });
+
+  it('refuses assets when no store is configured', async () => {
+    const disabled = await createHarness();
+    harnesses.push(disabled);
+    const response = await disabled.app.inject({
+      method: 'POST',
+      url: '/assets',
+      headers: { ...auth, 'content-type': 'application/octet-stream' },
+      payload: '{}',
+    });
+    expect(response.statusCode).toBe(403);
+  });
+});
+
+describe('capacity', () => {
+  it('returns a retryable busy error when the queue is saturated', async () => {
+    const saturated = await build({ TOOL_CONCURRENCY: 1, TOOL_QUEUE_LIMIT: 0 });
+    await writeFile(
+      join(saturated.dataRoot, 'big.json'),
+      JSON.stringify(Array.from({ length: 20_000 }, (_, index) => ({ index }))),
+    );
+    const payload = {
+      source: { kind: 'local_path', path: 'big.json' },
+      filter: '[.[].index] | add',
+    };
+
+    const [first, second] = await Promise.all([
+      saturated.app.inject({ method: 'POST', url: '/tools/query_json_jq', headers: auth, payload }),
+      saturated.app.inject({ method: 'POST', url: '/tools/query_json_jq', headers: auth, payload }),
+    ]);
+    const statuses = [first.statusCode, second.statusCode].sort();
+    expect(statuses).toEqual([200, 503]);
+    const busy = [first, second].find((response) => response.statusCode === 503);
+    expect(busy?.json().error).toMatchObject({ code: 'busy', retryable: true });
   });
 });

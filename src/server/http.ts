@@ -13,6 +13,7 @@ import type { ToolRegistry } from '../tools/registry.js';
 import { createAuthenticator, type Principal } from './auth.js';
 import { registerErrorHandler } from './errors.js';
 import { FixedWindowRateLimiter, type RateLimitDecision } from './rate-limit.js';
+import { registerAssetRoutes } from './routes/assets.js';
 import type { HttpServer } from './types.js';
 
 declare module 'fastify' {
@@ -27,6 +28,15 @@ export interface HttpServerDeps {
   readonly services: Services;
   readonly registry: ToolRegistry;
 }
+
+/** Aborts in-flight work when the client disconnects before the response is sent. */
+const requestSignal = (reply: FastifyReply): AbortSignal => {
+  const controller = new AbortController();
+  reply.raw.on('close', () => {
+    if (!reply.raw.writableEnded) controller.abort();
+  });
+  return controller.signal;
+};
 
 export const createHttpServer = ({
   config,
@@ -58,7 +68,7 @@ export const createHttpServer = ({
       'retry-after',
       String(Math.max(1, Math.ceil((decision.resetAtMs - Date.now()) / 1000))),
     );
-    return new AppError('rate_limited', 'Too many requests; slow down and retry');
+    return new AppError('rate_limited', 'Too many requests; slow down and retry', undefined, true);
   };
 
   app.addHook('onSend', (request, reply, payload, done) => {
@@ -75,18 +85,48 @@ export const createHttpServer = ({
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
   }));
 
-  app.get('/version', () => ({
-    service: config.service.name,
-    version: config.service.version,
-    gitSha: config.service.gitSha,
-    node: process.version,
-    environment: config.env,
-    capabilities: {
-      transports: ['stdio', 'streamable-http', 'http-openapi'],
-      authMode: config.auth.mode,
-      tools: registry.list().map((tool) => tool.name),
-    },
-  }));
+  app.get('/ready', async (request, reply) => {
+    if (!services.runtime.isAccepting) {
+      return reply.code(503).send({ status: 'draining', state: services.runtime.lifecycleState });
+    }
+    try {
+      await services.runtime.check();
+      await services.assets.check();
+      return {
+        status: 'ready' as const,
+        checks: {
+          executables: services.runtime.executableVersions ?? {},
+          assetStore: services.assets.kind,
+          temporaryStorage: 'ok',
+        },
+      };
+    } catch (error) {
+      request.log.error({ err: error, event: 'readiness.failed' }, 'readiness check failed');
+      return reply.code(503).send({ status: 'not_ready' });
+    }
+  });
+
+  app.get('/version', async () => {
+    const versions = await services.runtime
+      .executables()
+      .then((executables) => ({ jq: executables.jq.version, ripgrep: executables.ripgrep.version }))
+      .catch(() => undefined);
+    return {
+      service: config.service.name,
+      version: config.service.version,
+      gitSha: config.service.gitSha,
+      node: process.version,
+      environment: config.env,
+      capabilities: {
+        transports: ['stdio', 'streamable-http', 'http-openapi'],
+        authMode: config.auth.mode,
+        tools: registry.list().map((tool) => tool.name),
+        assetStore: config.assets.store.kind,
+        localPaths: config.data.localPathsEnabled,
+        executables: versions ?? { jq: 'unavailable', ripgrep: 'unavailable' },
+      },
+    };
+  });
 
   const openApi = buildOpenApiDocument(config, registry);
   app.get('/openapi.json', () => openApi);
@@ -95,7 +135,7 @@ export const createHttpServer = ({
     await protectedApp.register(fastifyRateLimit, {
       global: false,
       errorResponseBuilder: () =>
-        new AppError('rate_limited', 'Too many requests; slow down and retry'),
+        new AppError('rate_limited', 'Too many requests; slow down and retry', undefined, true),
     });
 
     const authenticateAndLimit = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -105,12 +145,13 @@ export const createHttpServer = ({
       void reply.header('x-ratelimit-remaining', String(decision.remaining));
       if (!decision.allowed) throw rateLimitError(reply, decision);
     };
+    // @fastify/rate-limit runs before preValidation, so it bounds unauthenticated abuse by address.
     const protectedRouteOptions = {
       config: {
         rateLimit: {
-          max: Math.max(1, config.http.rateLimit.max * 2),
+          max: Math.max(1, config.http.preAuthRateLimitMax),
           timeWindow: config.http.rateLimit.windowMs,
-          allowList: () => config.http.rateLimit.max === 0,
+          allowList: () => config.http.preAuthRateLimitMax === 0,
         },
       },
       preValidation: authenticateAndLimit,
@@ -131,7 +172,7 @@ export const createHttpServer = ({
     protectedApp.post<{ Params: { toolName: string }; Body: unknown }>(
       '/tools/:toolName',
       protectedRouteOptions,
-      async (request) => {
+      async (request, reply) => {
         const tool = registry.get(request.params.toolName);
         const principal = request.principal?.id ?? 'anonymous';
         const invokedAt = Date.now();
@@ -139,11 +180,13 @@ export const createHttpServer = ({
         const result = await tool.invoke(request.body ?? {}, services, {
           requestId: request.id,
           principal,
+          signal: requestSignal(reply),
         });
         request.log.info({
           event: 'tool.result',
           tool: tool.name,
           durationMs: Date.now() - invokedAt,
+          queued: services.runtime.toolQueue.queued,
         });
         return { tool: tool.name, requestId: request.id, result };
       },
@@ -154,6 +197,7 @@ export const createHttpServer = ({
       const server = createMcpServer(config, registry, services, {
         requestId: request.id,
         principal: request.principal?.id ?? 'anonymous',
+        signal: requestSignal(reply),
       });
       let closed = false;
       const close = async (): Promise<void> => {
@@ -193,6 +237,10 @@ export const createHttpServer = ({
     protectedApp.get<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
     protectedApp.post<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
     protectedApp.delete<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
+
+    await protectedApp.register((assetApp) =>
+      registerAssetRoutes(assetApp, { config, services, routeOptions: protectedRouteOptions }),
+    );
   });
 
   return app;
