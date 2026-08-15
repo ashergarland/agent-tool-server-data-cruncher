@@ -94,6 +94,20 @@ digests with `timingSafeEqual`, so neither key length nor an early mismatch is o
 pre-authentication limit bounds unauthenticated abuse by address; an authenticated limit bounds each
 principal. Authentication can only be disabled outside production.
 
+Two different hash choices are deliberate, and each is wrong in the other's place:
+
+| Derivation           | Primitive                                                      | Why                                                                                                                                                                                                                                                                       |
+| -------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Principal identifier | scrypt (N=2^15, r=8, p=1), fixed salt, once per key at startup | The output leaves the process: it appears in logs and namespaces each principal's assets. If one leaks, a memory-hard KDF keeps even a low-entropy operator-chosen key out of reach offline. Determinism keeps asset ownership stable across restarts and key reordering. |
+| Verification digest  | HMAC-SHA256 under a 32-byte random pepper, per request         | The output never leaves memory, so there is no offline attack surface: recovering it already requires process memory, which holds the plaintext keys. It must stay cheap because unauthenticated requests reach it.                                                       |
+
+Putting a memory-hard KDF on the verification path would create a denial-of-service amplifier —
+roughly 100 ms of CPU and 32 MiB per unauthenticated request — which is why `digest()` carries an
+explicit warning not to "upgrade" it. Conversely, the identifier derivation previously used an
+unkeyed SHA-256 truncated to 64 bits; that was a genuine weakness, caught by CodeQL
+(`js/insufficient-password-hash`) and fixed rather than suppressed. The corresponding alert on the
+HMAC comparison is a false positive for this usage and is dismissed with that reasoning recorded.
+
 ### Data leakage through logs
 
 Mitigation: logs carry request ids, tool names, durations, byte counts and queue depth only. File

@@ -1,3 +1,4 @@
+import { createHash, scryptSync } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { createAuthenticator } from '../../src/server/auth.js';
@@ -12,11 +13,30 @@ describe('api key authentication', () => {
   it('accepts bearer tokens and x-api-key headers', async () => {
     const principal = await authenticator.authenticate(request({ 'x-api-key': apiKey }));
     expect(principal.kind).toBe('api-key');
-    expect(principal.id).toMatch(/^key:[0-9a-f]{16}$/);
+    expect(principal.id).toMatch(/^key:[0-9a-f]{32}$/);
     expect(principal.id).not.toContain(apiKey);
     await expect(
       authenticator.authenticate(request({ authorization: `Bearer ${apiKey}` })),
     ).resolves.toEqual(principal);
+  });
+
+  it('derives principal ids with a memory-hard KDF, not a cheap digest', async () => {
+    const { id } = await authenticator.authenticate(request({ 'x-api-key': apiKey }));
+
+    // A leaked principal id must not be brute-forceable with a fast unkeyed hash.
+    for (const algorithm of ['sha256', 'sha1', 'md5', 'sha512']) {
+      const cheap = createHash(algorithm).update(apiKey, 'utf8').digest('hex');
+      expect(cheap).not.toContain(id.slice(4));
+      expect(id).not.toContain(cheap.slice(0, 16));
+    }
+    expect(id.slice(4)).toBe(
+      scryptSync(apiKey, 'agent-tool-server-data-cruncher/principal-id/v1', 16, {
+        N: 32_768,
+        r: 8,
+        p: 1,
+        maxmem: 64 * 1024 * 1024,
+      }).toString('hex'),
+    );
   });
 
   it('rejects missing, malformed and incorrect credentials of any length', async () => {
