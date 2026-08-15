@@ -106,11 +106,31 @@ describe('authentication and limits', () => {
     expect((await open.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(200);
   });
 
-  it('applies a pre-authentication abuse limit', async () => {
+  it('applies a pre-authentication abuse limit to failed credentials only', async () => {
     const limited = await build({ PRE_AUTH_RATE_LIMIT_MAX: 2 });
     expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
     expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
     expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(429);
+  });
+
+  it('does not spend the pre-authentication budget on valid credentials', async () => {
+    // The abuse budget is deliberately far smaller than the per-principal budget, so an
+    // authenticated client must never be throttled by it.
+    const limited = await build({ PRE_AUTH_RATE_LIMIT_MAX: 2, RATE_LIMIT_MAX: 20 });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect(
+        (await limited.app.inject({ method: 'GET', url: '/tools', headers: auth })).statusCode,
+      ).toBe(200);
+    }
+  });
+
+  it('keeps a valid principal working while another address is blocked', async () => {
+    const limited = await build({ PRE_AUTH_RATE_LIMIT_MAX: 1, RATE_LIMIT_MAX: 20 });
+    expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(401);
+    expect((await limited.app.inject({ method: 'GET', url: '/tools' })).statusCode).toBe(429);
+    expect(
+      (await limited.app.inject({ method: 'GET', url: '/tools', headers: auth })).statusCode,
+    ).toBe(200);
   });
 
   it('rate limits authenticated principals', async () => {
@@ -120,7 +140,7 @@ describe('authentication and limits', () => {
     ).toBe(200);
     const blocked = await limited.app.inject({ method: 'GET', url: '/tools', headers: auth });
     expect(blocked.statusCode).toBe(429);
-    expect(blocked.json().error.retryable).toBe(true);
+    expect(blocked.json<{ error: { retryable: boolean } }>().error.retryable).toBe(true);
   });
 });
 

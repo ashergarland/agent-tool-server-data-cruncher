@@ -1,14 +1,16 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildChildEnvironment } from '../../src/runtime/child-environment.js';
 import { findExecutable, resolveExecutables } from '../../src/runtime/executables.js';
+import { createRuntime } from '../../src/runtime/index.js';
 import { BoundedQueue } from '../../src/runtime/queue.js';
 import { runCommand } from '../../src/runtime/subprocess.js';
 import { LineSplitter } from '../../src/util/lines.js';
 import { sanitizeLine, sanitizeStderr } from '../../src/util/sanitize.js';
+import { testConfig } from '../helpers/harness.js';
 
 const node = { name: 'jq' as const, path: process.execPath, version: 'test' };
 
@@ -188,6 +190,24 @@ describe('bounded queue', () => {
   });
 });
 
+describe('runtime lifecycle', () => {
+  it('retries after a transient initialisation failure instead of caching the rejection', async () => {
+    const missing = join(tempDir, 'not-created-yet', 'nested');
+    const config = testConfig({ TEMP_DIR: missing, DATA_ROOT: tempDir });
+    const runtime = createRuntime(config);
+
+    // mkdir fails while the parent is a file, mirroring a tmpfs that is not mounted yet.
+    await writeFile(join(tempDir, 'not-created-yet'), 'blocking');
+    await expect(runtime.workspace()).rejects.toBeInstanceOf(Error);
+
+    await rm(join(tempDir, 'not-created-yet'), { force: true });
+    // The next caller must retry rather than replay the cached rejection.
+    const workspace = await runtime.workspace();
+    expect(typeof workspace.root).toBe('string');
+    await expect(runtime.check()).resolves.toBeUndefined();
+    await runtime.close();
+  });
+});
 describe('output helpers', () => {
   it('drops lines that exceed the buffer cap', () => {
     const lines: string[] = [];

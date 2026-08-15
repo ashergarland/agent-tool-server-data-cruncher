@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { matchCountCeiling, outputBytesCeiling } from '../config/index.js';
 import { badRequest } from '../errors.js';
 import type { DataReference } from '../services/data-cruncher.js';
 import type { Services } from '../services/index.js';
@@ -101,9 +102,11 @@ export const queryJsonJqTool = defineTool({
         .number()
         .int()
         .min(1024)
-        .max(1024 * 1024)
+        .max(outputBytesCeiling)
         .optional()
-        .describe('Byte budget for the returned output; the server caps this value.'),
+        .describe(
+          'Byte budget for the returned output. The server clamps this to its configured maximum, which is usually far smaller.',
+        ),
     })
     .superRefine(requireExactlyOneSource),
   outputSchema: z.object({
@@ -135,9 +138,11 @@ export const ripgrepSearchTool = defineTool({
         .number()
         .int()
         .min(1)
-        .max(1000)
+        .max(matchCountCeiling)
         .default(100)
-        .describe('Maximum matches to return; the server caps this value.'),
+        .describe(
+          'Maximum matches to return. The server clamps this to its configured maximum, which is usually far smaller.',
+        ),
     })
     .superRefine(requireExactlyOneSource),
   outputSchema: z.object({

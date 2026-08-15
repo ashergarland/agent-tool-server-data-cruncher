@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
 import type { AppConfig } from '../../config/index.js';
 import { badRequest, payloadTooLarge } from '../../errors.js';
@@ -10,7 +10,6 @@ const assetIdSchema = z.string().regex(/^[0-9a-f]{32}$/, 'Unknown asset');
 export interface AssetRouteOptions {
   readonly config: AppConfig;
   readonly services: Services;
-  readonly routeOptions: RouteShorthandOptions;
 }
 
 const principalOf = (request: FastifyRequest): string => request.principal?.id ?? 'anonymous';
@@ -33,12 +32,12 @@ const filenameOf = (request: FastifyRequest): string => {
  */
 export const registerAssetRoutes = (
   app: FastifyInstance,
-  { config, services, routeOptions }: AssetRouteOptions,
+  { config, services }: AssetRouteOptions,
 ): Promise<void> => {
   app.removeContentTypeParser(['application/json', 'text/plain']);
   app.addContentTypeParser('*', (_request, payload, done) => done(null, payload));
 
-  app.post('/assets', routeOptions, async (request: FastifyRequest, reply: FastifyReply) => {
+  app.post('/assets', async (request: FastifyRequest, reply: FastifyReply) => {
     const size = declaredLength(request);
     if (size !== undefined && size > config.assets.maxBytes) {
       throw payloadTooLarge('Upload exceeds the maximum asset size', {
@@ -57,23 +56,19 @@ export const registerAssetRoutes = (
     return reply.code(201).send({ asset: metadata });
   });
 
-  app.get('/assets', routeOptions, async (request: FastifyRequest) => ({
+  app.get('/assets', async (request: FastifyRequest) => ({
     assets: await services.assets.list(principalOf(request)),
   }));
 
-  app.get<{ Params: { assetId: string } }>('/assets/:assetId', routeOptions, async (request) => ({
+  app.get<{ Params: { assetId: string } }>('/assets/:assetId', async (request) => ({
     asset: await services.assets.head(parseAssetId(request.params.assetId), principalOf(request)),
   }));
 
-  app.delete<{ Params: { assetId: string } }>(
-    '/assets/:assetId',
-    routeOptions,
-    async (request, reply) => {
-      await services.assets.remove(parseAssetId(request.params.assetId), principalOf(request));
-      request.log.info({ event: 'asset.delete' });
-      return reply.code(204).send();
-    },
-  );
+  app.delete<{ Params: { assetId: string } }>('/assets/:assetId', async (request, reply) => {
+    await services.assets.remove(parseAssetId(request.params.assetId), principalOf(request));
+    request.log.info({ event: 'asset.delete' });
+    return reply.code(204).send();
+  });
 
   return Promise.resolve();
 };

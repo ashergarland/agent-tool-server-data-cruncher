@@ -1,6 +1,7 @@
 import type { AppConfig, ExecutionLimits } from '../config/index.js';
 import { badRequest, outputLimit, timedOut, upstreamError } from '../errors.js';
 import type { Runtime } from '../runtime/index.js';
+import { ExecutableResolutionError } from '../runtime/executables.js';
 import { ExecutableMissingError, runCommand, type CommandResult } from '../runtime/subprocess.js';
 import { LineSplitter } from '../util/lines.js';
 import { sanitizeLine, sanitizeStderr } from '../util/sanitize.js';
@@ -265,12 +266,14 @@ export class DataCruncherService {
       readonly onStdout: (chunk: Buffer) => boolean;
     },
   ): Promise<CommandResult> {
-    const [executables, workspace, env] = await Promise.all([
-      this.runtime.executables(),
-      this.runtime.workspace(),
-      this.runtime.childEnvironment(),
-    ]);
     try {
+      // Resolution is inside the try because a missing, unreadable or too-old binary is an
+      // operational failure of this server, not a caller error.
+      const [executables, workspace, env] = await Promise.all([
+        this.runtime.executables(),
+        this.runtime.workspace(),
+        this.runtime.childEnvironment(),
+      ]);
       return await runCommand({
         executable: name === 'jq' ? executables.jq : executables.ripgrep,
         args,
@@ -283,7 +286,7 @@ export class DataCruncherService {
         onStdout: options.onStdout,
       });
     } catch (error) {
-      if (error instanceof ExecutableMissingError) {
+      if (error instanceof ExecutableMissingError || error instanceof ExecutableResolutionError) {
         throw upstreamError('The search tooling is unavailable on this server');
       }
       throw error;

@@ -52,11 +52,14 @@ export class FilesystemAssetStore implements AssetStore {
     const owner = ownerKey(upload.principal);
     const directory = join(this.options.root, owner);
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    assertWithinQuota(await this.usage(upload.principal), this.options.limits);
+    const remainingQuotaBytes = assertWithinQuota(
+      await this.usage(upload.principal),
+      this.options.limits,
+    );
 
     const assetId = newAssetId();
     const staging = join(directory, `.staging-${assetId}`);
-    const metered = meterStream(upload.body, this.options.limits.maxBytes);
+    const metered = meterStream(upload.body, this.options.limits.maxBytes, remainingQuotaBytes);
     try {
       await pipeline(metered.stream, createWriteStream(staging, { mode: 0o600 }));
     } catch (error) {
@@ -163,9 +166,15 @@ export class FilesystemAssetStore implements AssetStore {
   }
 
   private async readFile(path: string): Promise<AssetMetadata | undefined> {
-    const raw = await readFile(path, 'utf8').catch(() => undefined);
-    if (raw === undefined) return undefined;
-    const parsed = metadataSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : undefined;
+    // Sidecars can be truncated: put() publishes the .bin before writeFile persists the metadata,
+    // and writeFile is not atomic. A corrupt sidecar must read as a missing asset rather than
+    // throwing, since list() fans out over the whole directory and every upload calls it.
+    try {
+      const raw = await readFile(path, 'utf8');
+      const parsed = metadataSchema.safeParse(JSON.parse(raw));
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

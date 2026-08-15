@@ -83,16 +83,23 @@ single threaded, and searches stop as soon as enough matches are collected.
 
 Mitigation: opaque random asset ids, storage keys prefixed by a hash of the principal, ownership
 checked on every read, delete and materialisation, and "not yours" reported identically to "does not
-exist" to avoid an existence oracle. Per-principal count and byte quotas, a TTL enforced by the
-server and by a storage lifecycle rule, materialisation to unpredictable temporary filenames, and
-removal in a `finally` block. Containers are private; no SAS token or public URL is ever issued.
+exist" to avoid an existence oracle. Per-principal count and byte quotas, with the byte quota
+enforced as bytes arrive rather than only at admission, so an upload cannot overshoot it. A TTL
+enforced by the server and by a storage lifecycle rule, materialisation to unpredictable temporary
+filenames, and removal in a `finally` block. Containers are private; no SAS token or public URL is
+ever issued.
 
 ### Credential attacks
 
 Mitigation: API keys must be at least 32 characters. Authentication compares fixed-width HMAC
-digests with `timingSafeEqual`, so neither key length nor an early mismatch is observable. A
-pre-authentication limit bounds unauthenticated abuse by address; an authenticated limit bounds each
-principal. Authentication can only be disabled outside production.
+digests with `timingSafeEqual`, so neither key length nor an early mismatch is observable.
+Authentication runs at `onRequest`, before any body is parsed, and drives two independent budgets:
+a per-principal quota for valid callers, and a per-address budget consumed only by requests that
+fail to authenticate. Checking the address budget before knowing whether a credential is valid
+would let one noisy neighbour behind a shared address lock out everyone else, so the order matters.
+The address key is only meaningful when `TRUST_PROXY` names the fronting proxy; otherwise every
+caller behind an ingress shares a single budget, which is documented rather than disguised as a
+per-client limit. Authentication can only be disabled outside production.
 
 Two different hash choices are deliberate, and each is wrong in the other's place:
 

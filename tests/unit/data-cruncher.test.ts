@@ -1,6 +1,7 @@
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ExecutableResolutionError } from '../../src/runtime/executables.js';
 import type { Harness } from '../helpers/harness.js';
 import { createHarness } from '../helpers/harness.js';
 import { FakeAssetStore } from '../helpers/fake-asset-store.js';
@@ -385,6 +386,25 @@ describe('data references', () => {
 });
 
 describe('execution bounds', () => {
+  it('reports unresolvable tooling as an upstream failure, not an internal error', async () => {
+    // A binary that is absent, unreadable or too old is an operational failure of this server.
+    const broken = await createHarness();
+    try {
+      const runtime = broken.runtime as unknown as {
+        executables: () => Promise<never>;
+      };
+      runtime.executables = () =>
+        Promise.reject(new ExecutableResolutionError('jq was not found on PATH'));
+
+      await writeFile(join(broken.dataRoot, 'data.json'), '{}');
+      await expect(
+        broken.services.dataCruncher.queryJson(localPath('data.json'), { filter: '.' }, context),
+      ).rejects.toMatchObject({ code: 'upstream_error', retryable: true });
+    } finally {
+      await broken.dispose();
+    }
+  });
+
   it('rejects work when the queue is saturated', async () => {
     const saturated = await createHarness({
       env: { TOOL_CONCURRENCY: 1, TOOL_QUEUE_LIMIT: 0 },

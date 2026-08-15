@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import fastifyRateLimit from '@fastify/rate-limit';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
@@ -62,13 +61,24 @@ export const createHttpServer = ({
     },
     requestIdHeader: false,
     bodyLimit: 1_000_000,
-    trustProxy: false,
+    trustProxy: config.http.trustProxy,
   });
   const authenticator = createAuthenticator(config);
-  const limiter = new FixedWindowRateLimiter(
+  // Two independent budgets. The per-principal budget is a fair-use quota for a valid caller; the
+  // per-address budget bounds abuse from callers that cannot authenticate. Keeping them separate
+  // means a well-behaved client is never throttled by the stricter abuse budget.
+  const principalLimiter = new FixedWindowRateLimiter(
     config.http.rateLimit.max,
     config.http.rateLimit.windowMs,
   );
+  const preAuthLimiter = new FixedWindowRateLimiter(
+    config.http.preAuthRateLimitMax,
+    config.http.rateLimit.windowMs,
+  );
+  // Meaningful only when TRUST_PROXY names the fronting proxy; otherwise every caller behind an
+  // ingress shares one bucket, so the default is a single shared budget rather than a false
+  // per-client one.
+  const addressKey = (request: FastifyRequest): string => request.ip || 'unknown';
 
   const rateLimitError = (reply: FastifyReply, decision: RateLimitDecision): AppError => {
     void reply.header(
@@ -168,32 +178,30 @@ export const createHttpServer = ({
   app.get('/openapi.json', () => openApi);
 
   void app.register(async (protectedApp) => {
-    await protectedApp.register(fastifyRateLimit, {
-      global: false,
-      errorResponseBuilder: () =>
-        new AppError('rate_limited', 'Too many requests; slow down and retry', undefined, true),
-    });
-
+    /**
+     * Authentication only reads a header, so it runs at `onRequest` — before body parsing. That
+     * ordering matters: a valid caller is charged solely to its own principal budget, while
+     * traffic that cannot authenticate is charged to the per-address abuse budget and rejected
+     * without the server reading a body. Checking the address budget before knowing whether the
+     * credential is valid would let one noisy neighbour lock out everyone sharing an address.
+     */
     const authenticateAndLimit = async (request: FastifyRequest, reply: FastifyReply) => {
-      const principal = await authenticator.authenticate(request);
+      let principal: Principal;
+      try {
+        principal = await authenticator.authenticate(request);
+      } catch (error) {
+        const abuse = preAuthLimiter.consume(addressKey(request));
+        if (!abuse.allowed) throw rateLimitError(reply, abuse);
+        throw error;
+      }
       request.principal = principal;
-      const decision = limiter.consume(principal.id);
+      const decision = principalLimiter.consume(principal.id);
       void reply.header('x-ratelimit-remaining', String(decision.remaining));
       if (!decision.allowed) throw rateLimitError(reply, decision);
     };
-    // @fastify/rate-limit runs before preValidation, so it bounds unauthenticated abuse by address.
-    const protectedRouteOptions = {
-      config: {
-        rateLimit: {
-          max: Math.max(1, config.http.preAuthRateLimitMax),
-          timeWindow: config.http.rateLimit.windowMs,
-          allowList: () => config.http.preAuthRateLimitMax === 0,
-        },
-      },
-      preValidation: authenticateAndLimit,
-    };
+    protectedApp.addHook('onRequest', authenticateAndLimit);
 
-    protectedApp.get('/tools', protectedRouteOptions, () => ({
+    protectedApp.get('/tools', () => ({
       tools: registry.list().map((tool) => ({
         name: tool.name,
         title: tool.title,
@@ -207,7 +215,6 @@ export const createHttpServer = ({
 
     protectedApp.post<{ Params: { toolName: string }; Body: unknown }>(
       '/tools/:toolName',
-      protectedRouteOptions,
       async (request, reply) => {
         const tool = registry.get(request.params.toolName);
         const principal = request.principal?.id ?? 'anonymous';
@@ -270,13 +277,11 @@ export const createHttpServer = ({
       }
     };
 
-    protectedApp.get<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
-    protectedApp.post<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
-    protectedApp.delete<{ Body: unknown }>('/mcp', protectedRouteOptions, handleMcp);
+    protectedApp.get<{ Body: unknown }>('/mcp', handleMcp);
+    protectedApp.post<{ Body: unknown }>('/mcp', handleMcp);
+    protectedApp.delete<{ Body: unknown }>('/mcp', handleMcp);
 
-    await protectedApp.register((assetApp) =>
-      registerAssetRoutes(assetApp, { config, services, routeOptions: protectedRouteOptions }),
-    );
+    await protectedApp.register((assetApp) => registerAssetRoutes(assetApp, { config, services }));
   });
 
   return app;

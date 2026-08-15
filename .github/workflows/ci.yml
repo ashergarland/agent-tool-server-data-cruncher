@@ -59,7 +59,8 @@ jobs:
           API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
           docker run --rm -d --name tool-server -p 8080:8080 \
             --read-only --tmpfs /tmp:rw,mode=1777,size=128m \
-            -e API_KEYS="$API_KEY" agent-tool-server-data-cruncher:test
+            -e API_KEYS="$API_KEY" -e LOCAL_PATHS_ENABLED=true \
+            agent-tool-server-data-cruncher:test
           trap 'docker logs tool-server; docker stop tool-server' EXIT
           for attempt in {1..30}; do
             curl --fail --silent http://127.0.0.1:8080/health && break
@@ -74,6 +75,19 @@ jobs:
             http://127.0.0.1:8080/tools)" = 401
           curl --fail --silent -H "x-api-key: $API_KEY" http://127.0.0.1:8080/tools > /dev/null
           test "$(docker inspect --format '{{.Config.User}}' tool-server)" = node
+      - name: Refuse to start without local paths or an asset store
+        run: |
+          set -euo pipefail
+          API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
+          # The image must not bake in LOCAL_PATHS_ENABLED: production has to fail fast when
+          # neither local paths nor an asset store are configured.
+          if output=$(docker run --rm -e API_KEYS="$API_KEY" \
+            agent-tool-server-data-cruncher:test 2>&1); then
+            echo "Expected the container to exit non-zero; it started instead:"
+            echo "$output"
+            exit 1
+          fi
+          echo "$output" | grep -q 'asset store or explicitly enabled local paths'
       - name: Verify the image reports supported jq and ripgrep versions
         run: |
           set -euo pipefail

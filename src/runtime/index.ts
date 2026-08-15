@@ -61,32 +61,63 @@ export class Runtime {
     };
   }
 
+  /**
+   * Memoises a lazily-initialised resource, but drops the memo if it rejects so a transient
+   * failure (tmpfs not yet mounted, a probe timing out under load) does not become permanent for
+   * the life of the process. `check()` is deliberately re-runnable and readiness is only cached
+   * for a few seconds, so the next caller must be able to retry.
+   */
+  private memoize<T>(
+    read: () => Promise<T> | undefined,
+    store: (promise: Promise<T> | undefined) => void,
+    create: () => Promise<T>,
+  ): Promise<T> {
+    const existing = read();
+    if (existing) return existing;
+    const promise = create().catch((error: unknown) => {
+      store(undefined);
+      throw error;
+    });
+    store(promise);
+    return promise;
+  }
+
   public workspace(): Promise<RuntimeWorkspace> {
-    this.workspacePromise ??= (async () => {
-      const root = join(
-        this.config.limits.tempDir,
-        `data-cruncher-${process.pid}-${randomBytes(6).toString('hex')}`,
-      );
-      const workspace: RuntimeWorkspace = {
-        root,
-        childTempDir: join(root, 'child'),
-        materializeDir: join(root, 'materialized'),
-      };
-      await mkdir(workspace.childTempDir, { recursive: true, mode: 0o700 });
-      await mkdir(workspace.materializeDir, { recursive: true, mode: 0o700 });
-      return workspace;
-    })();
-    return this.workspacePromise;
+    return this.memoize(
+      () => this.workspacePromise,
+      (promise) => {
+        this.workspacePromise = promise;
+      },
+      async () => {
+        const root = join(
+          this.config.limits.tempDir,
+          `data-cruncher-${process.pid}-${randomBytes(6).toString('hex')}`,
+        );
+        const workspace: RuntimeWorkspace = {
+          root,
+          childTempDir: join(root, 'child'),
+          materializeDir: join(root, 'materialized'),
+        };
+        await mkdir(workspace.childTempDir, { recursive: true, mode: 0o700 });
+        await mkdir(workspace.materializeDir, { recursive: true, mode: 0o700 });
+        return workspace;
+      },
+    );
   }
 
   public executables(): Promise<Executables> {
-    this.executablesPromise ??= (async () => {
-      const workspace = await this.workspace();
-      const executables = await resolveExecutables({ tempDir: workspace.childTempDir });
-      this.cachedExecutables = executables;
-      return executables;
-    })();
-    return this.executablesPromise;
+    return this.memoize(
+      () => this.executablesPromise,
+      (promise) => {
+        this.executablesPromise = promise;
+      },
+      async () => {
+        const workspace = await this.workspace();
+        const executables = await resolveExecutables({ tempDir: workspace.childTempDir });
+        this.cachedExecutables = executables;
+        return executables;
+      },
+    );
   }
 
   public async childEnvironment(): Promise<Record<string, string>> {

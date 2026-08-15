@@ -164,9 +164,10 @@ curl -s -X DELETE "https://<host>/assets/$ASSET" -H "Authorization: Bearer $API_
 ```
 
 Assets are private, owned by the uploading principal, quota-bounded and deleted automatically when
-their TTL expires (24 hours by default). Storage containers are private, use managed identity, and
-never issue public URLs or SAS tokens. Uploaded bytes are only read to answer your own tool calls,
-and neither storage paths nor temporary paths are ever returned.
+their TTL expires (24 hours by default). The byte quota is enforced as bytes arrive, so an upload
+cannot overshoot it. Storage containers are private, use managed identity, and never issue public
+URLs or SAS tokens. Uploaded bytes are only read to answer your own tool calls, and neither storage
+paths nor temporary paths are ever returned.
 
 ## Limits and behaviour
 
@@ -180,6 +181,11 @@ and neither storage paths nor temporary paths are ever returned.
 | `MAX_LINE_LENGTH`       | 2000    | Returned lines are clipped and flagged      |
 | `TOOL_CONCURRENCY`      | 2       | Concurrent jq/ripgrep executions            |
 | `TOOL_QUEUE_LIMIT`      | 32      | Queued executions before a retryable `busy` |
+
+Tool schemas accept the widest value the configuration allows, and each request is clamped to the
+deployment's actual limit — so raising `MAX_OUTPUT_BYTES` or `MAX_MATCHES` takes effect without a
+client change, and asking for more than a deployment permits returns a smaller result rather than a
+validation error.
 
 Semantics worth knowing:
 

@@ -75,6 +75,18 @@ restarted in a loop.
 and add private endpoints plus a VNet-integrated Container Apps environment for a fully private
 deployment; the parameter exists so that change does not require editing templates.
 
+The app sets `TRUST_PROXY=true` because Container Apps ingress always fronts it, so
+`X-Forwarded-For` is the only way to distinguish callers for the per-address abuse budget. Do not
+set that variable when the service is reachable directly, or callers can spoof their address.
+
+## Local paths and the image default
+
+The image deliberately leaves `LOCAL_PATHS_ENABLED` unset. Production defaults it to `false`, and
+the server refuses to start when neither local paths nor an asset store are configured — a
+misconfigured deployment fails loudly instead of silently exposing the filesystem. `localPathsEnabled`
+defaults to `false` here too, so hosted deployments use assets; set it to `true` only when the image
+genuinely carries data at `dataRoot`.
+
 ## Identity and secrets
 
 The Container App uses a user-assigned managed identity to pull from ACR, read the Key Vault secret

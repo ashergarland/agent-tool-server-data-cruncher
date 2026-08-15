@@ -125,6 +125,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
               value: string(localPathsEnabled)
             }
             {
+              // Container Apps ingress always fronts the app, so X-Forwarded-For is the only way
+              // to tell callers apart for the per-address abuse budget.
+              name: 'TRUST_PROXY'
+              value: 'true'
+            }
+            {
               name: 'DATA_ROOT'
               value: dataRoot
             }

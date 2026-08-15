@@ -26,6 +26,15 @@ export const withoutBlankValues = (source: NodeJS.ProcessEnv): NodeJS.ProcessEnv
 
 const mebibyte = 1024 * 1024;
 
+/**
+ * Absolute ceilings for the configurable limits. Tool input schemas use the same values so a
+ * caller-supplied budget is never rejected by validation for a value the deployment allows; the
+ * service clamps each request against the actual configured limit.
+ */
+export const outputBytesCeiling = 64 * mebibyte;
+export const matchCountCeiling = 10_000;
+export const fileBytesCeiling = 4096 * mebibyte;
+
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
@@ -44,24 +53,19 @@ export const envSchema = z.object({
     .number()
     .int()
     .min(1024)
-    .max(4096 * mebibyte)
+    .max(fileBytesCeiling)
     .default(64 * mebibyte),
   MAX_FILTER_LENGTH: z.coerce.number().int().min(1).max(100_000).default(4096),
   MAX_PATTERN_LENGTH: z.coerce.number().int().min(1).max(100_000).default(1024),
   SUBPROCESS_TIMEOUT_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),
-  MAX_OUTPUT_BYTES: z.coerce
-    .number()
-    .int()
-    .min(1024)
-    .max(64 * mebibyte)
-    .default(mebibyte),
+  MAX_OUTPUT_BYTES: z.coerce.number().int().min(1024).max(outputBytesCeiling).default(mebibyte),
   DEFAULT_OUTPUT_BYTES: z.coerce
     .number()
     .int()
     .min(1024)
-    .max(64 * mebibyte)
+    .max(outputBytesCeiling)
     .default(128 * 1024),
-  MAX_MATCHES: z.coerce.number().int().min(1).max(10_000).default(1000),
+  MAX_MATCHES: z.coerce.number().int().min(1).max(matchCountCeiling).default(1000),
   MAX_LINE_LENGTH: z.coerce.number().int().min(16).max(65_536).default(2000),
   TOOL_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(2),
   TOOL_QUEUE_LIMIT: z.coerce.number().int().min(0).max(4096).default(32),
@@ -74,12 +78,7 @@ export const envSchema = z.object({
   AZURE_STORAGE_ACCOUNT: z.string().min(3).max(24).optional(),
   AZURE_STORAGE_CONTAINER: z.string().min(3).max(63).optional(),
   AZURE_CLIENT_ID: z.string().min(1).optional(),
-  ASSET_MAX_BYTES: z.coerce
-    .number()
-    .int()
-    .min(1024)
-    .max(4096 * mebibyte)
-    .optional(),
+  ASSET_MAX_BYTES: z.coerce.number().int().min(1024).max(fileBytesCeiling).optional(),
   ASSET_TTL_SECONDS: z.coerce.number().int().min(60).max(2_592_000).default(86_400),
   ASSET_QUOTA_BYTES: z.coerce
     .number()
@@ -89,6 +88,7 @@ export const envSchema = z.object({
     .default(1024 * mebibyte),
   ASSET_QUOTA_COUNT: z.coerce.number().int().min(1).max(100_000).default(100),
 
+  TRUST_PROXY: z.string().min(1).optional(),
   RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(120),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
   PRE_AUTH_RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(60),
@@ -137,6 +137,7 @@ export interface AppConfig {
     readonly port: number;
     readonly rateLimit: { readonly max: number; readonly windowMs: number };
     readonly preAuthRateLimitMax: number;
+    readonly trustProxy: boolean | number | string[];
     readonly shutdownGraceMs: number;
   };
   readonly logLevel: Env['LOG_LEVEL'];
@@ -182,6 +183,25 @@ const assetStoreConfig = (env: Env): AssetStoreConfig => {
     };
   }
   return { kind: 'disabled' };
+};
+
+/**
+ * Proxy trust decides whether `request.ip` is the caller's address or the ingress address, which
+ * is what the per-address abuse limit is keyed on. Accepts a boolean, a hop count, or a list of
+ * trusted addresses/CIDRs; defaults to trusting nothing.
+ */
+const parseTrustProxy = (value: string | undefined): boolean | number | string[] => {
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  if (/^\d+$/.test(normalized)) return Number.parseInt(normalized, 10);
+  const entries = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0) return false;
+  return entries;
 };
 
 export const buildConfig = (env: Env): AppConfig => {
@@ -238,6 +258,7 @@ export const buildConfig = (env: Env): AppConfig => {
       port: env.PORT,
       rateLimit: { max: env.RATE_LIMIT_MAX, windowMs: env.RATE_LIMIT_WINDOW_MS },
       preAuthRateLimitMax: env.PRE_AUTH_RATE_LIMIT_MAX,
+      trustProxy: parseTrustProxy(env.TRUST_PROXY),
       shutdownGraceMs: env.SHUTDOWN_GRACE_MS,
     },
     logLevel: env.LOG_LEVEL,

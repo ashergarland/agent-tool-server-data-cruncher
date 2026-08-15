@@ -55,8 +55,18 @@ export interface MeteredStream {
   digest(): string;
 }
 
-/** Streams the body while hashing it and failing fast once the byte limit is exceeded. */
-export const meterStream = (source: Readable, maxBytes: number): MeteredStream => {
+/**
+ * Streams the body while hashing it and failing fast once a byte limit is exceeded.
+ *
+ * `maxBytes` is the per-upload ceiling; `remainingQuotaBytes` is what is left of the principal's
+ * storage quota. Enforcing both here makes the quota a real ceiling rather than an admission
+ * threshold, because the check happens as bytes arrive rather than before the stream starts.
+ */
+export const meterStream = (
+  source: Readable,
+  maxBytes: number,
+  remainingQuotaBytes = Number.POSITIVE_INFINITY,
+): MeteredStream => {
   const hash = createHash('sha256');
   let size = 0;
   const meter = new Transform({
@@ -64,6 +74,14 @@ export const meterStream = (source: Readable, maxBytes: number): MeteredStream =
       size += chunk.length;
       if (size > maxBytes) {
         callback(payloadTooLarge('Upload exceeds the maximum asset size', { maxBytes }));
+        return;
+      }
+      if (size > remainingQuotaBytes) {
+        callback(
+          forbidden('Upload would exceed the asset storage quota', {
+            remainingQuotaBytes: Math.max(0, remainingQuotaBytes),
+          }),
+        );
         return;
       }
       hash.update(chunk);
@@ -84,10 +102,11 @@ export interface QuotaUsage {
   readonly bytes: number;
 }
 
+/** Rejects a principal that is already at quota and returns the bytes still available to it. */
 export const assertWithinQuota = (
   usage: QuotaUsage,
   limits: { readonly quotaCount: number; readonly quotaBytes: number },
-): void => {
+): number => {
   if (usage.count >= limits.quotaCount) {
     throw forbidden('Asset count quota reached; delete assets before uploading more', {
       quotaCount: limits.quotaCount,
@@ -98,4 +117,5 @@ export const assertWithinQuota = (
       quotaBytes: limits.quotaBytes,
     });
   }
+  return limits.quotaBytes - usage.bytes;
 };

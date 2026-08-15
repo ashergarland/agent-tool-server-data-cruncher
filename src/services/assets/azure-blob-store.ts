@@ -74,7 +74,10 @@ export class AzureBlobAssetStore implements AssetStore {
   }
 
   public async put(upload: AssetUpload): Promise<AssetMetadata> {
-    assertWithinQuota(await this.usage(upload.principal), this.options.limits);
+    const remainingQuotaBytes = assertWithinQuota(
+      await this.usage(upload.principal),
+      this.options.limits,
+    );
     const container = await this.client();
     const assetId = newAssetId();
     const filename = sanitizeFilename(upload.filename);
@@ -82,7 +85,7 @@ export class AzureBlobAssetStore implements AssetStore {
     const expiresAt = expiryFrom(createdAt, this.options.limits.ttlSeconds);
     const contentType = guessContentType(filename, upload.contentType);
     const blob = container.getBlockBlobClient(this.blobName(upload.principal, assetId));
-    const metered = meterStream(upload.body, this.options.limits.maxBytes);
+    const metered = meterStream(upload.body, this.options.limits.maxBytes, remainingQuotaBytes);
 
     try {
       await blob.uploadStream(metered.stream, uploadBufferBytes, uploadConcurrency, {

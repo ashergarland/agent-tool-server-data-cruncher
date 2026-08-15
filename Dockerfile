@@ -24,13 +24,15 @@ RUN apk add --no-cache jq ripgrep \
 
 ARG GIT_SHA=unknown
 ARG SERVICE_VERSION=0.0.0-dev
+# LOCAL_PATHS_ENABLED is deliberately unset: production defaults it to false, and the config layer
+# refuses to start when neither local paths nor an asset store are configured. Baking a value here
+# would silently enable filesystem reads and disable that guard. Opt in explicitly at deploy time.
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
     GIT_SHA=${GIT_SHA} \
     SERVICE_VERSION=${SERVICE_VERSION} \
     DATA_ROOT=/data \
-    LOCAL_PATHS_ENABLED=true \
     TEMP_DIR=/tmp/data-cruncher
 
 WORKDIR /app

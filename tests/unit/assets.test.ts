@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile as writeFileFs } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -114,6 +114,52 @@ describe('filesystem asset store', () => {
     expect(await readdir(materialized)).toHaveLength(1);
     await asset.dispose();
     expect(await readdir(materialized)).toHaveLength(0);
+  });
+
+  it('enforces the byte quota as a ceiling, not an admission threshold', async () => {
+    // Sitting just under the quota must not permit a further full-size upload.
+    const bounded = new FilesystemAssetStore({
+      root,
+      limits: { ...limits, quotaBytes: 3000, maxBytes: 4096 },
+      materializeDir: () => Promise.resolve(materialized),
+    });
+    await bounded.put({
+      principal: 'key:1',
+      filename: 'a.json',
+      contentType: 'application/json',
+      body: body('x'.repeat(2900)),
+    });
+
+    await expect(
+      bounded.put({
+        principal: 'key:1',
+        filename: 'b.json',
+        contentType: 'application/json',
+        body: body('y'.repeat(1000)),
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+
+    const stored = await bounded.list('key:1');
+    expect(stored.reduce((total, asset) => total + asset.sizeBytes, 0)).toBeLessThanOrEqual(3000);
+    expect(await readdir(join(root, ownerKey('key:1')))).toHaveLength(2); // .bin + .json only
+  });
+
+  it('treats a corrupt metadata sidecar as a missing asset', async () => {
+    const good = await upload('key:1');
+    const directory = join(root, ownerKey('key:1'));
+    // put() publishes the .bin before the sidecar, and writeFile is not atomic.
+    await writeFileFs(join(directory, `${'0'.repeat(32)}.json`), '{"assetId": "trunca');
+
+    await expect(store.list('key:1')).resolves.toHaveLength(1);
+    await expect(store.head(good.assetId, 'key:1')).resolves.toMatchObject({
+      assetId: good.assetId,
+    });
+    await expect(store.head('0'.repeat(32), 'key:1')).rejects.toMatchObject({
+      code: 'bad_request',
+    });
+    // A corrupt sidecar must not block further uploads for the principal.
+    await expect(upload('key:1')).resolves.toMatchObject({ filename: 'data.json' });
+    await expect(store.sweep()).resolves.toBeGreaterThanOrEqual(0);
   });
 
   it('deletes assets on request', async () => {
