@@ -184,6 +184,11 @@ export const createHttpServer = ({
      * traffic that cannot authenticate is charged to the per-address abuse budget and rejected
      * without the server reading a body. Checking the address budget before knowing whether the
      * credential is valid would let one noisy neighbour lock out everyone sharing an address.
+     *
+     * Every route in this scope is therefore both authenticated and rate limited by this single
+     * hook. Static analysis that only recognises rate-limiting middleware packages reports these
+     * routes as unlimited; the behaviour is covered by tests instead. Do not remove either
+     * `consume` call.
      */
     const authenticateAndLimit = async (request: FastifyRequest, reply: FastifyReply) => {
       let principal: Principal;
