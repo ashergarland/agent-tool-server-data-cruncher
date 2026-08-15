@@ -74,9 +74,10 @@ const parseVersion = (name: 'jq' | 'rg', output: string): string => {
 // jq must be 1.7+: queries pass the filter after `--`, and 1.6 treats an end-of-options separator
 // that precedes the program as a usage error (exit 2), which the failure mapper would surface as
 // invalid input on every call. Do not lower this without also changing how the filter is passed.
+// rg is held at 14 to match the README, Dockerfile and CI rather than for a flag requirement.
 const minimumMajorMinor: Readonly<Record<'jq' | 'rg', readonly [number, number]>> = {
   jq: [1, 7],
-  rg: [13, 0],
+  rg: [14, 0],
 };
 
 const assertSupported = (name: 'jq' | 'rg', version: string): void => {
