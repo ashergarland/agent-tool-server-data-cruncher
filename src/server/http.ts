@@ -29,6 +29,13 @@ export interface HttpServerDeps {
   readonly registry: ToolRegistry;
 }
 
+const readinessCacheMs = 3000;
+
+interface ReadinessResult {
+  readonly ready: boolean;
+  readonly body: Record<string, unknown>;
+}
+
 /** Aborts in-flight work when the client disconnects before the response is sent. */
 const requestSignal = (reply: FastifyReply): AbortSignal => {
   const controller = new AbortController();
@@ -85,25 +92,54 @@ export const createHttpServer = ({
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
   }));
 
-  app.get('/ready', async (request, reply) => {
-    if (!services.runtime.isAccepting) {
-      return reply.code(503).send({ status: 'draining', state: services.runtime.lifecycleState });
-    }
+  // `/ready` is public so orchestrators can probe it, and each check touches disk and the asset
+  // store. The result is cached and concurrent probes share one evaluation so an unauthenticated
+  // flood cannot amplify into storage calls or scratch-space churn.
+  let readinessCache: { readonly at: number; readonly value: ReadinessResult } | undefined;
+  let readinessInFlight: Promise<ReadinessResult> | undefined;
+
+  const evaluateReadiness = async (): Promise<ReadinessResult> => {
     try {
       await services.runtime.check();
       await services.assets.check();
       return {
-        status: 'ready' as const,
-        checks: {
-          executables: services.runtime.executableVersions ?? {},
-          assetStore: services.assets.kind,
-          temporaryStorage: 'ok',
+        ready: true,
+        body: {
+          status: 'ready',
+          checks: {
+            executables: services.runtime.executableVersions ?? {},
+            assetStore: services.assets.kind,
+            temporaryStorage: 'ok',
+          },
         },
       };
     } catch (error) {
-      request.log.error({ err: error, event: 'readiness.failed' }, 'readiness check failed');
-      return reply.code(503).send({ status: 'not_ready' });
+      logger.error({ err: error, event: 'readiness.failed' }, 'readiness check failed');
+      return { ready: false, body: { status: 'not_ready' } };
     }
+  };
+
+  const readiness = (): Promise<ReadinessResult> => {
+    if (readinessCache && Date.now() - readinessCache.at < readinessCacheMs) {
+      return Promise.resolve(readinessCache.value);
+    }
+    readinessInFlight ??= evaluateReadiness()
+      .then((value) => {
+        readinessCache = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => {
+        readinessInFlight = undefined;
+      });
+    return readinessInFlight;
+  };
+
+  app.get('/ready', async (_request, reply) => {
+    if (!services.runtime.isAccepting) {
+      return reply.code(503).send({ status: 'draining', state: services.runtime.lifecycleState });
+    }
+    const result = await readiness();
+    return reply.code(result.ready ? 200 : 503).send(result.body);
   });
 
   app.get('/version', async () => {

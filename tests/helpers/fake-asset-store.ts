@@ -20,6 +20,7 @@ interface Entry {
 export class FakeAssetStore implements AssetStore {
   public readonly kind = 'filesystem' as const;
   public failNext: 'check' | 'put' | 'materialize' | undefined;
+  public checkCalls = 0;
 
   private readonly entries = new Map<string, Entry>();
   private readonly directories: string[] = [];
@@ -27,6 +28,7 @@ export class FakeAssetStore implements AssetStore {
   public constructor(private readonly ttlSeconds = 3600) {}
 
   public check(): Promise<void> {
+    this.checkCalls += 1;
     if (this.failNext === 'check') throw upstreamError('asset store unavailable');
     return Promise.resolve();
   }

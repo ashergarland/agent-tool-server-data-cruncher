@@ -23,17 +23,23 @@ hosted asset storage, and the three transports that expose the same registry.
 
 ## Threats and mitigations
 
-### Secret exfiltration through jq
+### Secret exfiltration and file reads through jq
 
-`jq` exposes the process environment through `env` and `$ENV`, and a caller controls the filter.
-Any inherited variable is therefore readable by the caller.
+A caller controls the jq program, and jq gives programs two ways to reach outside their input.
+`env`/`$ENV` expose the process environment, and the module system (`import "x" as $v {search:
+"/dir"};`, `include "x";`) reads files chosen by the program text — the `search` metadata overrides
+`HOME` and the default search path, so a filter alone could read any `.json` or `.jq` file the
+process can open, bypassing every data-root and asset check.
 
 Mitigation: children never inherit the parent environment. `buildChildEnvironment` constructs an
 allowlist from scratch containing only `PATH` (restricted to the directories of the resolved
 binaries), `LANG`/`LC_ALL`, and an isolated `HOME`/`TMPDIR`. `RIPGREP_CONFIG_PATH`, `JQ_*`,
 `NODE_OPTIONS`, proxy variables and every credential are absent by construction. `HOME` points at an
-empty scratch directory so `~/.jq` modules cannot be loaded. Tests assert that a sentinel secret in
-the parent process is invisible to `env`, `$ENV` and to a real child.
+empty scratch directory so `~/.jq` modules cannot be loaded. jq has no flag that disables module
+loading, so `assertNoModuleDirectives` rejects `import`/`include` directives before execution; the
+scan skips comments and string literals so fields and variables with those names still work. Tests
+assert that a sentinel secret in the parent process is invisible to `env`, `$ENV` and to a real
+child, and that a module directive cannot return the contents of a file outside the data root.
 
 Platform note: on Windows, libuv copies a fixed list of operating-system variables (`USERNAME`,
 `USERPROFILE`, `HOMEDRIVE` and similar) into every child regardless of the environment supplied.

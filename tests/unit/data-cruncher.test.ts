@@ -1,4 +1,4 @@
-import { symlink, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Harness } from '../helpers/harness.js';
@@ -143,6 +143,50 @@ describe('jq queries', () => {
     );
     expect(result.output).toBe('1');
     expect(result.warnings.join(' ')).toContain('byte order mark');
+  });
+
+  it('refuses jq module directives that would read files outside the input', async () => {
+    await write('data.json', '{"a":1}');
+    const outside = join(harness.tempDir, 'modules');
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'secret.json'), '{"password":"hunter2"}');
+    const search = outside.replace(/\\/g, '/');
+
+    for (const filter of [
+      `import "secret" as $s {search: "${search}"}; $s`,
+      `include "secret" {search: "${search}"}; .`,
+      `  #comment\n import "secret" as $s {search: "${search}"}; $s`,
+    ]) {
+      const failure = await harness.services.dataCruncher
+        .queryJson(localPath('data.json'), { filter }, context)
+        .then((result) => result.output)
+        .catch((error: unknown) => error as { code?: string; message?: string });
+      expect(failure).toMatchObject({ code: 'bad_request' });
+      expect(JSON.stringify(failure)).not.toContain('hunter2');
+    }
+  });
+
+  it('still allows fields and strings named import or include', async () => {
+    await write('data.json', '{"import":{"id":7},"include":2}');
+
+    expect(
+      (
+        await harness.services.dataCruncher.queryJson(
+          localPath('data.json'),
+          { filter: '.import.id + .include' },
+          context,
+        )
+      ).output,
+    ).toBe('9');
+    expect(
+      (
+        await harness.services.dataCruncher.queryJson(
+          localPath('data.json'),
+          { filter: '"import include"' },
+          context,
+        )
+      ).output,
+    ).toBe('"import include"');
   });
 
   it('rejects filters longer than the configured maximum', async () => {

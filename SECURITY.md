@@ -13,7 +13,8 @@ findings before release.
 
 Two properties are load bearing and must not be weakened:
 
-1. Child processes receive a constructed allowlist environment. `jq` can read its environment, so
-   inheriting the parent process environment would hand callers every application secret.
+1. Child processes receive a constructed allowlist environment, and jq filters may not use module
+   directives. `jq` can read its environment and can load files named by the program itself, so
+   either gap would hand callers application secrets or files outside the requested input.
 2. Callers never supply a path to a child process. Input is validated, opened, and streamed to the
    child through stdin.

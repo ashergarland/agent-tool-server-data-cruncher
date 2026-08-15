@@ -5,6 +5,7 @@ import { ExecutableMissingError, runCommand, type CommandResult } from '../runti
 import { LineSplitter } from '../util/lines.js';
 import { sanitizeLine, sanitizeStderr } from '../util/sanitize.js';
 import type { AssetStore } from './assets/index.js';
+import { assertNoModuleDirectives } from './jq-filter.js';
 import { LocalPathResolver, openRegularFile, type OpenedFile } from './local-paths.js';
 
 export type DataReference =
@@ -78,6 +79,7 @@ export class DataCruncherService {
     context: ExecutionContext,
   ): Promise<JsonQueryResult> {
     this.assertLength(request.filter, this.limits.maxFilterLength, 'filter');
+    assertNoModuleDirectives(request.filter);
     const budget = Math.min(
       request.maxOutputBytes ?? this.limits.defaultOutputBytes,
       this.limits.maxOutputBytes,

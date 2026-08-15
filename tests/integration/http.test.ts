@@ -51,16 +51,28 @@ describe('public endpoints', () => {
     expect(ready.statusCode).toBe(200);
     expect(ready.json()).toMatchObject({ status: 'ready', checks: { assetStore: 'filesystem' } });
 
-    assets.failNext = 'check';
-    const failing = await harness.app.inject({ method: 'GET', url: '/ready' });
-    expect(failing.statusCode).toBe(503);
-    expect(failing.json()).toEqual({ status: 'not_ready' });
-    assets.failNext = undefined;
-
     harness.runtime.beginDraining();
     const draining = await harness.app.inject({ method: 'GET', url: '/ready' });
     expect(draining.statusCode).toBe(503);
-    expect(draining.json().status).toBe('draining');
+    expect(draining.json<{ status: string }>().status).toBe('draining');
+  });
+
+  it('reports a failing dependency without leaking details', async () => {
+    assets.failNext = 'check';
+    const failing = await build();
+    const response = await failing.app.inject({ method: 'GET', url: '/ready' });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ status: 'not_ready' });
+    assets.failNext = undefined;
+  });
+
+  it('caches readiness so unauthenticated probes cannot amplify into storage calls', async () => {
+    const probed = await build();
+    assets.checkCalls = 0;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await probed.app.inject({ method: 'GET', url: '/ready' })).statusCode).toBe(200);
+    }
+    expect(assets.checkCalls).toBe(1);
   });
 
   it('publishes the generated OpenAPI document', async () => {

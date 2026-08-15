@@ -184,6 +184,8 @@ and neither storage paths nor temporary paths are ever returned.
 Semantics worth knowing:
 
 - jq runs with `--compact-output`; JSONL is handled natively, so `inputs` sees every record.
+- jq module directives (`import`, `include`) are rejected: they would read files chosen by the
+  filter rather than the requested input.
 - ripgrep is line oriented, one file per call, with `--max-count` applied per call.
 - Input must be UTF-8. A UTF-8 BOM is skipped; UTF-16/32 and binary input are rejected.
 - Errors use one envelope (`code`, `message`, `retryable`, `requestId`) across every transport.
