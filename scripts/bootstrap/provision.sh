@@ -7,6 +7,8 @@ DEPLOYMENT_NAME="ats-${ENVIRONMENT_NAME}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short=12 HEAD)}"
 SECRET_NAME="tool-server-api-key"
 DATA_ROOT="${DATA_ROOT:-/data}"
+LOCAL_PATHS_ENABLED="${LOCAL_PATHS_ENABLED:-false}"
+ASSET_RETENTION_HOURS="${ASSET_RETENTION_HOURS:-24}"
 BOOTSTRAP_PRINCIPAL_OBJECT_ID="$(az ad signed-in-user show --query id -o tsv)"
 
 az bicep build --file infra/main.bicep >/dev/null
@@ -50,7 +52,7 @@ unset API_KEY
 
 az acr build \
   --registry "$REGISTRY_NAME" \
-  --image "agent-tool-server:${IMAGE_TAG}" \
+  --image "agent-tool-server-data-cruncher:${IMAGE_TAG}" \
   --build-arg "GIT_SHA=${IMAGE_TAG}" \
   --build-arg "SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}" \
   . \
@@ -65,6 +67,8 @@ az deployment sub create \
     location="$LOCATION" \
     deployApp=true \
     bootstrapPrincipalObjectId="$BOOTSTRAP_PRINCIPAL_OBJECT_ID" \
-    containerImage="${REGISTRY_SERVER}/agent-tool-server:${IMAGE_TAG}" \
+    containerImage="${REGISTRY_SERVER}/agent-tool-server-data-cruncher:${IMAGE_TAG}" \
+    localPathsEnabled="$LOCAL_PATHS_ENABLED" \
+    assetRetentionHours="$ASSET_RETENTION_HOURS" \
     dataRoot="$DATA_ROOT" \
   --only-show-errors
