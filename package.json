@@ -42,6 +42,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "pretest:coverage": "node scripts/ensure-data-toolchain.mjs",
     "test:coverage": "vitest run --coverage"
   },
   "repository": {
