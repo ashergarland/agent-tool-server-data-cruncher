@@ -42,10 +42,16 @@ the explicit allowlist.
 
 ### jq module reads
 
-jq's `import` and `include` directives can select files independently of input stdin, and jq has no
-switch that disables module loading. Data Cruncher's capability-owned scanner rejects module
-directives before execution while permitting those words in strings, comments, and object fields.
-Scratch-scoped `HOME` also prevents loading an operator's normal jq home state.
+jq's `import`, `include`, and `module` directives and `modulemeta` builtin can invoke module
+handling independently of input stdin, and jq has no switch that disables module loading. jq 1.8
+also lets a backslash-newline continue a `#` comment across physical lines. A scanner that ends
+every comment at the first newline can therefore become desynchronized and miss a later directive.
+
+Data Cruncher's capability-owned scanner models jq 1.7/1.8 code, string, interpolation, delimiter,
+and comment states, including odd backslash-newline continuation. It rejects module-loading tokens
+before execution, fails closed on incomplete lexical state, and permits those words in literal
+strings, ordinary comments, fields, and bindings. Scratch-scoped `HOME` also prevents loading an
+operator's normal jq home state.
 
 ### Command and argument injection
 

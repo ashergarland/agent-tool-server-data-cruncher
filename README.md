@@ -45,7 +45,8 @@ Searches one UTF-8 log or text file with a ripgrep regular expression.
 | `maxResults` | no       | Requested match count, clamped to the configured deployment limit |
 
 Returns bounded matching lines in source order with one-based line numbers, plus `matchCount`,
-`scannedBytes`, `truncated`, and `warnings`.
+`scannedBytes`, `truncated`, and `warnings`. `truncated` is set for a match limit only when at least
+one additional match exists.
 
 Use it for narrow error, listener, port, readiness, probe, and lifecycle evidence in large logs.
 Use `query_json_jq` for structured diagnostics and raw access when exact surrounding content is
@@ -110,8 +111,10 @@ the parent:
 - on Windows only, the OS-root variables required to load system libraries.
 
 API keys, Azure credentials, proxy settings, `NODE_OPTIONS`, `JQ_*`, and
-`RIPGREP_CONFIG_PATH` are not inherited. jq module directives are also refused because jq has no
-switch that disables file-based `import` and `include`.
+`RIPGREP_CONFIG_PATH` are not inherited. jq `import`, `include`, `module`, and bare `modulemeta`
+loading are also refused because jq has no switch that disables module loading. The guard models jq
+1.7/1.8 strings, interpolation, ordinary comments, and jq 1.8 backslash-newline continued comments,
+and fails closed on incomplete lexical state.
 
 See [`docs/threat-model.md`](docs/threat-model.md) for the complete boundary.
 
@@ -215,8 +218,13 @@ packed jq child cannot see a parent sentinel secret.
 ## CI and release
 
 CI, security, and release are immutable callers of Agent Tool Platform commit
-`98ec8162fb11d5c04aee9e6f7b3625a472a0180d`. Normal publication accepts stable version tags and npm
-Trusted Publishing. This repository contains no deployment implementation.
+`98ec8162fb11d5c04aee9e6f7b3625a472a0180d`. CI requires packed-package smoke and then validates the
+deployment contract against that exact Platform checkout. Security grants the reusable CodeQL job
+only its required `security-events: write` and `packages: read` permissions.
+
+Normal publication accepts pushed stable `vX.Y.Z` tags and npm Trusted Publishing. Manual dispatch
+is limited to an exact-version dry run or explicit GitHub Release recovery; it cannot perform an
+ordinary publication. This repository contains no deployment implementation.
 
 ## Migration
 

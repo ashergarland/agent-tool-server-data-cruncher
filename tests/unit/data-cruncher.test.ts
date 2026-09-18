@@ -1,5 +1,6 @@
 import { mkdir, rename, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { BoundedQueue } from '@agent-tool-platform/runtime/concurrency';
 import type { BoundedProcessResult } from '@agent-tool-platform/runtime/process';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -33,6 +34,41 @@ const completedProcess = (stdout: string, stdinBytes: number): BoundedProcessRes
   stoppedEarly: false,
   durationMs: 1,
 });
+
+const createExternalModuleFixture = async (
+  harness: DataHarness,
+): Promise<{
+  readonly directImport: string;
+  readonly directInclude: string;
+  readonly continuedImport: string;
+  readonly continuedInclude: string;
+}> => {
+  const outside = join(harness.base, 'outside-modules');
+  await mkdir(outside);
+  await Promise.all([
+    writeFile(join(outside, 'secret.json'), '{"escaped":"EXTERNAL_JSON_SECRET"}\n', 'utf8'),
+    writeFile(join(outside, 'secret.jq'), 'def escaped: "EXTERNAL_JQ_MODULE";\n', 'utf8'),
+  ]);
+  const metadata = `{"search":${JSON.stringify(outside.replace(/\\/gu, '/'))}}`;
+  const directImport = `import "secret" as $secret ${metadata}; $secret[0].escaped`;
+  const directInclude = `include "secret" ${metadata}; escaped`;
+  const continueComment = (directive: string): string => `# ${'\\'}\n"\n${directive}`;
+  return {
+    directImport,
+    directInclude,
+    continuedImport: continueComment(directImport),
+    continuedInclude: continueComment(directInclude),
+  };
+};
+
+const runRawJqFilter = (harness: DataHarness, filter: string): Promise<BoundedProcessResult> =>
+  harness.application.services.toolchain.run(
+    'jq',
+    ['--compact-output', '--monochrome-output', '--', filter],
+    Readable.from([Buffer.from('{}\n')]),
+    signal(),
+    4096,
+  );
 
 describe('jq structured reduction', () => {
   it('projects JSON and preserves JSONL inputs semantics', async () => {
@@ -122,6 +158,100 @@ describe('jq structured reduction', () => {
     expect(() => assertNoModuleDirectives('{"import": .value, note: "include x"}')).not.toThrow();
   });
 
+  it('rejects direct import through the real capability path', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    await harness.application.services.toolchain.tooling();
+
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: filters.directImport },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+  });
+
+  it('rejects direct include through the real capability path', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    await harness.application.services.toolchain.tooling();
+
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: filters.directInclude },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+  });
+
+  it('rejects jq 1.8 continued-comment import before external JSON can escape', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    const { version } = (await harness.application.services.toolchain.tooling()).jq;
+    const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10) || 0);
+
+    if (major > 1 || (major === 1 && minor >= 8)) {
+      const unguarded = await runRawJqFilter(harness, filters.continuedImport);
+      expect(unguarded).toMatchObject({ code: 0, timedOut: false, aborted: false });
+      expect(unguarded.stdout.trim()).toBe('"EXTERNAL_JSON_SECRET"');
+    }
+
+    const rejected = await harness.application.services.dataCruncher
+      .queryJson('valid.json', { filter: filters.continuedImport }, signal())
+      .catch((error: unknown) => error);
+    expect(rejected).toMatchObject({ code: 'bad_request' });
+    expect(JSON.stringify(rejected)).not.toContain('EXTERNAL_JSON_SECRET');
+  });
+
+  it('rejects jq 1.8 continued-comment include before an external module can escape', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    const { version } = (await harness.application.services.toolchain.tooling()).jq;
+    const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10) || 0);
+
+    if (major > 1 || (major === 1 && minor >= 8)) {
+      const unguarded = await runRawJqFilter(harness, filters.continuedInclude);
+      expect(unguarded).toMatchObject({ code: 0, timedOut: false, aborted: false });
+      expect(unguarded.stdout.trim()).toBe('"EXTERNAL_JQ_MODULE"');
+    }
+
+    const rejected = await harness.application.services.dataCruncher
+      .queryJson('valid.json', { filter: filters.continuedInclude }, signal())
+      .catch((error: unknown) => error);
+    expect(rejected).toMatchObject({ code: 'bad_request' });
+    expect(JSON.stringify(rejected)).not.toContain('EXTERNAL_JQ_MODULE');
+  });
+
+  it('keeps jq 1.7-compatible comments, escaped strings, fields, and interpolation', async () => {
+    const harness = await makeHarness();
+    await writeFile(
+      join(harness.root, 'keywords.json'),
+      '{"import":"field value","include":"interpolated value"}\n',
+      'utf8',
+    );
+    const result = await harness.application.services.dataCruncher.queryJson(
+      'keywords.json',
+      {
+        filter:
+          '# import and include are ordinary comment text\n' +
+          '{note: "import \\"include\\" and \\\\ path", imported: .import, rendered: "\\(.include)"}',
+      },
+      signal(),
+    );
+
+    expect(JSON.parse(result.output)).toEqual({
+      note: 'import "include" and \\ path',
+      imported: 'field value',
+      rendered: 'interpolated value',
+    });
+  });
+
   it('truncates only at complete jq result boundaries', async () => {
     const harness = await makeHarness({
       MAX_OUTPUT_BYTES: '4096',
@@ -179,7 +309,7 @@ describe('ripgrep bounded log search', () => {
 
     const result = await harness.application.services.dataCruncher.ripgrep(
       'runtime.log',
-      { pattern: 'listener|readiness', maxResults: 10 },
+      { pattern: 'listener|readiness', maxResults: 2 },
       signal(),
     );
     expect(result.matches).toEqual([
@@ -195,6 +325,35 @@ describe('ripgrep bounded log search', () => {
       },
     ]);
     expect(result.truncated).toBe(false);
+  });
+
+  it('reports truncation only when a match exists beyond maxResults', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'exact.log'), 'ERROR one\nERROR two\n', 'utf8');
+    await writeFile(
+      join(harness.root, 'additional.log'),
+      'ERROR one\nERROR two\nERROR three\n',
+      'utf8',
+    );
+
+    const exact = await harness.application.services.dataCruncher.ripgrep(
+      'exact.log',
+      { pattern: 'ERROR', maxResults: 2 },
+      signal(),
+    );
+    expect(exact).toMatchObject({ matchCount: 2, truncated: false, warnings: [] });
+
+    const additional = await harness.application.services.dataCruncher.ripgrep(
+      'additional.log',
+      { pattern: 'ERROR', maxResults: 2 },
+      signal(),
+    );
+    expect(additional.matchCount).toBe(2);
+    expect(additional.matches.map((match) => match.line)).toEqual(['ERROR one', 'ERROR two']);
+    expect(additional.truncated).toBe(true);
+    expect(additional.warnings).toContain(
+      'Result limit reached; narrow the pattern or raise maxResults.',
+    );
   });
 
   it('bounds match count, line length, and process output', async () => {

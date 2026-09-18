@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const npmCli = process.env['npm_execpath'];
 const childSecretName = 'DATA_CRUNCHER_PACKAGE_SMOKE_SECRET';
+const continuedComment = (directive) => `# ${'\\'}\n"\n${directive}`;
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -232,6 +233,13 @@ const main = async () => {
       join(consumer, 'runtime.log'),
       'starting\nlistener 0.0.0.0:3000\nreadiness probe 8080 refused\n',
     );
+    const outsideModules = join(temporaryRoot, 'outside-modules');
+    await mkdir(outsideModules);
+    await Promise.all([
+      writeFile(join(outsideModules, 'secret.json'), '{"escaped":"PACKED_EXTERNAL_JSON_SECRET"}\n'),
+      writeFile(join(outsideModules, 'secret.jq'), 'def escaped: "PACKED_EXTERNAL_JQ_MODULE";\n'),
+    ]);
+    const moduleMetadata = `{"search":${JSON.stringify(outsideModules.replaceAll('\\', '/'))}}`;
 
     const installedEntry = join(installed, binTarget);
     await access(installedEntry, fsConstants.R_OK);
@@ -304,6 +312,36 @@ const main = async () => {
       'Packed jq child inherited the parent sentinel',
     );
 
+    const continuedImport = await client.request('tools/call', {
+      name: 'query_json_jq',
+      arguments: {
+        source: { kind: 'local_path', path: 'records.json' },
+        filter: continuedComment(
+          `import "secret" as $secret ${moduleMetadata}; $secret[0].escaped`,
+        ),
+      },
+    });
+    const continuedImportBody = JSON.stringify(continuedImport);
+    assert(
+      continuedImport.result?.isError === true &&
+        !continuedImportBody.includes('PACKED_EXTERNAL_JSON_SECRET'),
+      'Packed capability allowed the jq continued-comment import escape',
+    );
+
+    const continuedInclude = await client.request('tools/call', {
+      name: 'query_json_jq',
+      arguments: {
+        source: { kind: 'local_path', path: 'records.json' },
+        filter: continuedComment(`include "secret" ${moduleMetadata}; escaped`),
+      },
+    });
+    const continuedIncludeBody = JSON.stringify(continuedInclude);
+    assert(
+      continuedInclude.result?.isError === true &&
+        !continuedIncludeBody.includes('PACKED_EXTERNAL_JQ_MODULE'),
+      'Packed capability allowed the jq continued-comment include escape',
+    );
+
     const exit = await client.shutdown();
     assert(exit.code === 0, `Packed entrypoint exited with code ${String(exit.code)}`);
     assert(client.nonProtocolOutput.length === 0, 'Packed entrypoint wrote non-protocol stdout');
@@ -311,7 +349,8 @@ const main = async () => {
 
     process.stdout.write(
       `Package smoke passed for ${packageName}@${candidate.version}: ` +
-        `${packedFiles.length} files, both tools invoked outside the repository, child env scrubbed.\n`,
+        `${packedFiles.length} files, both tools invoked outside the repository, ` +
+        `child env scrubbed, external jq modules refused.\n`,
     );
   } finally {
     client?.terminate();

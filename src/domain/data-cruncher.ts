@@ -166,6 +166,7 @@ export class DataCruncherService {
       throw badRequest('maxResults must be a positive integer');
     }
     const maxResults = Math.min(request.maxResults, this.limits.maxMatches);
+    const observedResultLimit = maxResults + 1;
 
     return this.queue.run(async () => {
       const input = await this.workspace.openFile(path, { previewBytes: 8192 });
@@ -184,7 +185,7 @@ export class DataCruncherService {
             '--threads',
             '1',
             '--max-count',
-            String(maxResults),
+            String(observedResultLimit),
             '--max-columns',
             String(this.limits.maxLineLength),
             '--max-columns-preview',
@@ -207,21 +208,19 @@ export class DataCruncherService {
           throw upstreamError('ripgrep could not search this input');
         }
 
-        const matches = this.parseMatches(result.stdout, result.outputLimitReached).slice(
-          0,
-          maxResults,
-        );
-        const reachedResultLimit = matches.length >= maxResults;
+        const observedMatches = this.parseMatches(result.stdout, result.outputLimitReached);
+        const hasAdditionalMatch = observedMatches.length > maxResults;
+        const matches = observedMatches.slice(0, maxResults);
         if (result.outputLimitReached) {
           warnings.push('Search output reached the byte limit; results are incomplete.');
         }
-        if (reachedResultLimit) {
+        if (hasAdditionalMatch) {
           warnings.push('Result limit reached; narrow the pattern or raise maxResults.');
         }
         return {
           matches,
           matchCount: matches.length,
-          truncated: reachedResultLimit || result.outputLimitReached,
+          truncated: hasAdditionalMatch || result.outputLimitReached,
           scannedBytes: result.stdinBytes,
           warnings,
         };
