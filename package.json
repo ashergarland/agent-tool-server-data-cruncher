@@ -1,21 +1,40 @@
 {
   "name": "agent-tool-server-data-cruncher",
-  "version": "0.1.0",
-  "description": "MCP and HTTP tools for efficient local JSON filtering and text search.",
+  "version": "0.0.0-development",
+  "description": "Thin local-first capability for bounded jq reduction and ripgrep log search.",
   "license": "MIT",
   "type": "module",
-  "private": true,
   "engines": {
     "node": ">=22.0.0"
   },
-  "main": "dist/index.js",
+  "main": "./dist/public.js",
+  "types": "./dist/public.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/public.d.ts",
+      "import": "./dist/public.js"
+    }
+  },
+  "bin": {
+    "agent-tool-data-cruncher": "dist/stdio.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "prebuild": "npm run clean",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
-    "mcp:stdio": "node dist/mcp/stdio.js",
+    "mcp:stdio": "node dist/stdio.js",
     "openapi:emit": "tsx scripts/emit-openapi.ts openapi.json",
-    "metadata:validate": "tsx scripts/validate-metadata.ts",
+    "metadata:validate": "agent-tool-validate-metadata --server server.json --package package.json --registry examples/central-registry-entry.json",
+    "deployment:validate": "node scripts/validate-deployment-contract.mjs",
+    "deployment:conformance": "node scripts/run-deployment-conformance.mjs",
+    "package:smoke": "node scripts/package-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -23,21 +42,30 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "pretest:coverage": "node scripts/ensure-data-toolchain.mjs",
     "test:coverage": "vitest run --coverage"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ashergarland/agent-tool-server-data-cruncher.git"
   },
+  "homepage": "https://github.com/ashergarland/agent-tool-server-data-cruncher#readme",
+  "bugs": {
+    "url": "https://github.com/ashergarland/agent-tool-server-data-cruncher/issues"
+  },
+  "keywords": [
+    "mcp",
+    "agent-tools",
+    "jq",
+    "ripgrep",
+    "context-reduction"
+  ],
   "dependencies": {
-    "@azure/identity": "^4.13.1",
-    "@azure/storage-blob": "^12.33.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
-    "fastify": "5.11.2",
-    "pino": "10.3.1",
+    "@agent-tool-platform/runtime": "0.1.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@agent-tool-platform/testkit": "0.1.3",
     "@types/node": "22.20.1",
     "@vitest/coverage-v8": "4.1.10",
     "eslint": "9.39.5",
@@ -47,5 +75,20 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.66.0",
     "vitest": "4.1.10"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  },
+  "overrides": {
+    "@fastify/ajv-compiler": {
+      "fast-uri": "4.1.5"
+    },
+    "ajv": {
+      "fast-uri": "3.1.8"
+    },
+    "fast-json-stringify": {
+      "fast-uri": "4.1.5"
+    },
+    "js-yaml": "4.3.2"
   }
 }

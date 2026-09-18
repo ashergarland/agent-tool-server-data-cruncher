@@ -13,99 +13,49 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  # Agent Tool Platform workflow pin:
+  # 98ec8162fb11d5c04aee9e6f7b3625a472a0180d
+  capability:
+    permissions:
+      contents: read
+    uses: ashergarland/agent-tool-platform/.github/workflows/capability-ci.yml@98ec8162fb11d5c04aee9e6f7b3625a472a0180d
+    with:
+      node_version: '22'
+      openapi_path: openapi.json
+      run_package_smoke: true
+
+  deployment-contract:
+    name: Deployment contract
+    needs: capability
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check out the exact Platform contract revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ashergarland/agent-tool-platform
+          ref: 98ec8162fb11d5c04aee9e6f7b3625a472a0180d
+          path: .agent-tool-platform
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
-      - name: Install jq and ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes jq ripgrep
-      - name: Record tooling versions
-        run: |
-          jq --version
-          rg --version | head -n1
-      - run: npm ci
-      - run: npm run format:check
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run test:coverage
-      - run: npm run build
-      - run: npm run openapi:emit
-      - run: npm run metadata:validate
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openapi
-          path: openapi.json
+          cache-dependency-path: .agent-tool-platform/package-lock.json
 
-  container:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          push: false
-          tags: agent-tool-server-data-cruncher:test
-      - name: Smoke test a read-only non-root container
+      - name: Build the pinned Platform checkout
+        working-directory: .agent-tool-platform
         run: |
-          set -euo pipefail
-          API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
-          docker run --rm -d --name tool-server -p 8080:8080 \
-            --read-only --tmpfs /tmp:rw,mode=1777,size=128m \
-            -e API_KEYS="$API_KEY" -e LOCAL_PATHS_ENABLED=true \
-            agent-tool-server-data-cruncher:test
-          trap 'docker logs tool-server; docker stop tool-server' EXIT
-          for attempt in {1..30}; do
-            curl --fail --silent http://127.0.0.1:8080/health && break
-            sleep 1
-          done
-          for attempt in {1..30}; do
-            curl --fail --silent http://127.0.0.1:8080/ready && break
-            sleep 1
-          done
-          curl --fail --silent http://127.0.0.1:8080/version
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            http://127.0.0.1:8080/tools)" = 401
-          curl --fail --silent -H "x-api-key: $API_KEY" http://127.0.0.1:8080/tools > /dev/null
-          test "$(docker inspect --format '{{.Config.User}}' tool-server)" = node
-      - name: Refuse to start without local paths or an asset store
-        run: |
-          set -euo pipefail
-          API_KEY='ci-only-key-0000000000000000000000000000000000000000000000000000'
-          # The image must not bake in LOCAL_PATHS_ENABLED: production has to fail fast when
-          # neither local paths nor an asset store are configured.
-          if output=$(docker run --rm -e API_KEYS="$API_KEY" \
-            agent-tool-server-data-cruncher:test 2>&1); then
-            echo "Expected the container to exit non-zero; it started instead:"
-            echo "$output"
-            exit 1
-          fi
-          echo "$output" | grep -q 'asset store or explicitly enabled local paths'
-      - name: Verify the image reports supported jq and ripgrep versions
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint sh agent-tool-server-data-cruncher:test -c '
-            set -e
-            cat /etc/data-cruncher-tooling
-            jq --version | grep -Eq "^jq-(1\.[7-9]|1\.[1-9][0-9]|[2-9])"
-            rg --version | head -n1 | grep -Eq "^ripgrep (1[4-9]|[2-9][0-9])\."
-          '
+          npm ci
+          npm run build
 
-  bicep:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Bicep
-        run: az bicep install
-      - name: Build and lint Bicep
-        run: |
-          az bicep build --file infra/main.bicep
-          az bicep lint --file infra/main.bicep
-          az bicep build-params --file infra/parameters/dev.bicepparam
+      - name: Validate the public profile declaration
+        env:
+          AGENT_TOOL_PLATFORM_CHECKOUT: ${{ github.workspace }}/.agent-tool-platform
+        run: npm run deployment:validate
+
+      - name: Run deployment-contract conformance
+        env:
+          AGENT_TOOL_PLATFORM_CHECKOUT: ${{ github.workspace }}/.agent-tool-platform
+        run: npm run deployment:conformance

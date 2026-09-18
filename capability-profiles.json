@@ -1,0 +1,80 @@
+{
+  "contractVersion": 1,
+  "kind": "capability-profile-declaration",
+  "capability": {
+    "id": "io.github.ashergarland/agent-tool-server-data-cruncher",
+    "displayName": "Data Cruncher",
+    "repository": "https://github.com/ashergarland/agent-tool-server-data-cruncher"
+  },
+  "profiles": [
+    {
+      "id": "local-package",
+      "description": "Read-only local package execution over stdio against one explicitly selected filesystem root.",
+      "dimensions": {
+        "execution": "local",
+        "delivery": "package",
+        "access": "local-process",
+        "workload": "filesystem",
+        "provider": "none",
+        "mutation": "read-only"
+      },
+      "delivery": {
+        "supportedForms": ["package"],
+        "publication": {
+          "kind": "package",
+          "identifier": "agent-tool-server-data-cruncher"
+        },
+        "entrypoint": {
+          "reference": "dist/stdio.js",
+          "interface": "stdio"
+        },
+        "mechanics": [
+          {
+            "id": "local-stdio",
+            "reference": "README.md#run-the-capability"
+          }
+        ],
+        "provenance": {
+          "method": "package-metadata",
+          "reference": "package.json#repository"
+        }
+      },
+      "configuration": {
+        "schema": {
+          "id": "urn:io.github.ashergarland:agent-tool-server-data-cruncher:local-configuration:v1",
+          "capabilityId": "io.github.ashergarland/agent-tool-server-data-cruncher",
+          "path": "schemas/local-configuration.schema.json"
+        },
+        "bounded": true
+      },
+      "requiredSecrets": [],
+      "providerPrerequisites": [],
+      "identity": {
+        "trustBoundary": "The invoking local user and that user's operating-system permissions beneath the selected data root.",
+        "rbac": []
+      },
+      "workload": {
+        "interface": {
+          "kind": "filesystem",
+          "reference": "README.md#data-boundary"
+        },
+        "authorization": {
+          "scope": "Read one regular UTF-8 file beneath the explicitly selected local data root."
+        },
+        "lifecycle": {
+          "mode": "session",
+          "freshness": "Open and verify the requested file for each tool invocation.",
+          "cleanup": "Close the confined file descriptor after each invocation and remove lifecycle scratch at shutdown."
+        },
+        "notReady": {
+          "whenAbsent": "not-ready",
+          "reason": "Report deterministic not-ready state until the configured data root and jq/ripgrep tools are usable."
+        }
+      },
+      "extensionSchemas": [],
+      "verification": {
+        "surfaces": ["readiness", "version", "behavior", "provenance"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0",
+  "fixture": true,
+  "service": "checkout-api",
+  "revision": "checkout-api--pr-1842",
+  "commit": "6bf98d0",
+  "pipeline": {
+    "checkout": "succeeded",
+    "test": "succeeded",
+    "imageBuild": "succeeded",
+    "imagePush": "succeeded",
+    "revisionProvisioning": "succeeded",
+    "readiness": "failed"
+  },
+  "observations": [
+    {
+      "source": "container-stdout",
+      "kind": "listener",
+      "address": "0.0.0.0",
+      "port": 3000,
+      "healthPath": "/healthz"
+    },
+    {
+      "source": "revision-template",
+      "kind": "environment",
+      "names": ["NODE_ENV", "APP_PORT"]
+    },
+    {
+      "source": "readiness-controller",
+      "kind": "probe",
+      "transport": "tcp",
+      "port": 8080,
+      "attempts": 3,
+      "failures": 3,
+      "lastResult": "connection_refused"
+    },
+    {
+      "source": "registry",
+      "kind": "imagePull",
+      "result": "succeeded",
+      "digest": "sha256:2bf87a5c0d23"
+    }
+  ],
+  "warnings": [
+    {
+      "component": "source-map-upload",
+      "status": 403,
+      "pipelinePolicy": "continue-on-error"
+    }
+  ]
+}

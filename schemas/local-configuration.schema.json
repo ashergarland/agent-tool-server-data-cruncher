@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:io.github.ashergarland:agent-tool-server-data-cruncher:local-configuration:v1",
+  "title": "Data Cruncher local configuration",
+  "description": "Bounded local filesystem and jq/ripgrep process settings for the local package profile.",
+  "type": "object",
+  "properties": {
+    "DATA_ROOT": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Local data root. The stdio binary defaults this to its launch directory."
+    },
+    "JQ_PATH": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional absolute jq executable path."
+    },
+    "RIPGREP_PATH": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional absolute ripgrep executable path."
+    },
+    "TEMP_DIR": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional parent for the lifecycle-owned scratch workspace."
+    },
+    "MAX_FILE_BYTES": { "type": "integer", "minimum": 1024, "maximum": 4294967296 },
+    "MAX_FILTER_LENGTH": { "type": "integer", "minimum": 1, "maximum": 100000 },
+    "MAX_PATTERN_LENGTH": { "type": "integer", "minimum": 1, "maximum": 100000 },
+    "SUBPROCESS_TIMEOUT_MS": { "type": "integer", "minimum": 100, "maximum": 300000 },
+    "MAX_OUTPUT_BYTES": { "type": "integer", "minimum": 1024, "maximum": 67108864 },
+    "DEFAULT_OUTPUT_BYTES": { "type": "integer", "minimum": 1024, "maximum": 67108864 },
+    "MAX_MATCHES": { "type": "integer", "minimum": 1, "maximum": 10000 },
+    "MAX_LINE_LENGTH": { "type": "integer", "minimum": 16, "maximum": 65536 },
+    "TOOL_CONCURRENCY": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "TOOL_QUEUE_LIMIT": { "type": "integer", "minimum": 0, "maximum": 4096 }
+  },
+  "additionalProperties": false
+}

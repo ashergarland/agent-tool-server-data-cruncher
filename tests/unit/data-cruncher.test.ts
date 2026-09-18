@@ -1,466 +1,658 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ExecutableResolutionError } from '../../src/runtime/executables.js';
-import type { Harness } from '../helpers/harness.js';
-import { createHarness } from '../helpers/harness.js';
-import { FakeAssetStore } from '../helpers/fake-asset-store.js';
+import { mkdir, rename, symlink, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
+import { BoundedQueue } from '@agent-tool-platform/runtime/concurrency';
+import type { BoundedProcessResult } from '@agent-tool-platform/runtime/process';
+import { afterEach, describe, expect, it } from 'vitest';
+import { DataCruncherService, type DataProcessRunner } from '../../src/domain/data-cruncher.js';
+import { assertNoModuleDirectives } from '../../src/domain/jq-filter.js';
+import { createHarness, type DataHarness } from '../helpers/harness.js';
 
-const context = { principal: 'key:1' };
-const localPath = (path: string) => ({ kind: 'local_path', path }) as const;
-
-let harness: Harness;
-let assets: FakeAssetStore;
-
-beforeEach(async () => {
-  assets = new FakeAssetStore();
-  harness = await createHarness({ assetStore: assets });
-});
-
-afterEach(async () => {
-  await assets.close();
-  await harness.dispose();
-});
-
-const write = async (name: string, contents: string | Buffer): Promise<string> => {
-  await writeFile(join(harness.dataRoot, name), contents);
-  return name;
+const harnesses: DataHarness[] = [];
+const makeHarness = async (env: NodeJS.ProcessEnv = {}): Promise<DataHarness> => {
+  const harness = await createHarness({ env });
+  harnesses.push(harness);
+  return harness;
 };
 
-describe('jq queries', () => {
-  it('returns only the filtered output', async () => {
-    await write(
-      'users.json',
-      JSON.stringify({ users: [{ email: 'one@example.com' }, { email: 'two@example.com' }] }),
-    );
+afterEach(async () => {
+  await Promise.all(harnesses.splice(0).map((harness) => harness.cleanup()));
+});
 
-    const result = await harness.services.dataCruncher.queryJson(
-      localPath('users.json'),
-      { filter: '.users[].email' },
-      context,
+const signal = (): AbortSignal => new AbortController().signal;
+
+const completedProcess = (stdout: string, stdinBytes: number): BoundedProcessResult => ({
+  code: 0,
+  terminationSignal: null,
+  stdout,
+  stderr: '',
+  stdoutBytes: Buffer.byteLength(stdout),
+  stdinBytes,
+  timedOut: false,
+  aborted: false,
+  outputLimitReached: false,
+  stoppedEarly: false,
+  durationMs: 1,
+});
+
+const createExternalModuleFixture = async (
+  harness: DataHarness,
+): Promise<{
+  readonly directImport: string;
+  readonly directInclude: string;
+  readonly continuedImport: string;
+  readonly continuedInclude: string;
+}> => {
+  const outside = join(harness.base, 'outside-modules');
+  await mkdir(outside);
+  await Promise.all([
+    writeFile(join(outside, 'secret.json'), '{"escaped":"EXTERNAL_JSON_SECRET"}\n', 'utf8'),
+    writeFile(join(outside, 'secret.jq'), 'def escaped: "EXTERNAL_JQ_MODULE";\n', 'utf8'),
+  ]);
+  const metadata = `{"search":${JSON.stringify(outside.replace(/\\/gu, '/'))}}`;
+  const directImport = `import "secret" as $secret ${metadata}; $secret[0].escaped`;
+  const directInclude = `include "secret" ${metadata}; escaped`;
+  const continueComment = (directive: string): string => `# ${'\\'}\n"\n${directive}`;
+  return {
+    directImport,
+    directInclude,
+    continuedImport: continueComment(directImport),
+    continuedInclude: continueComment(directInclude),
+  };
+};
+
+const runRawJqFilter = (harness: DataHarness, filter: string): Promise<BoundedProcessResult> =>
+  harness.application.services.toolchain.run(
+    'jq',
+    ['--compact-output', '--monochrome-output', '--', filter],
+    Readable.from([Buffer.from('{}\n')]),
+    signal(),
+    4096,
+  );
+
+describe('jq structured reduction', () => {
+  it('projects JSON and preserves JSONL inputs semantics', async () => {
+    const harness = await makeHarness();
+    await writeFile(
+      join(harness.root, 'records.json'),
+      JSON.stringify({
+        items: [
+          { id: 1, state: 'ok' },
+          { id: 2, state: 'failed' },
+        ],
+      }),
+      'utf8',
     );
-    expect(result.output).toBe('"one@example.com"\n"two@example.com"');
-    expect(result.truncated).toBe(false);
-    expect(result.returnedBytes).toBe(result.output.length);
+    await writeFile(join(harness.root, 'records.jsonl'), '{"id":1}\n{"id":2}\n', 'utf8');
+
+    const projected = await harness.application.services.dataCruncher.queryJson(
+      'records.json',
+      { filter: '[.items[] | select(.state == "failed") | .id]' },
+      signal(),
+    );
+    expect(JSON.parse(projected.output)).toEqual([2]);
+    expect(projected.scannedBytes).toBeGreaterThan(0);
+    expect(projected.truncated).toBe(false);
+
+    const streamed = await harness.application.services.dataCruncher.queryJson(
+      'records.jsonl',
+      { filter: 'inputs | .id' },
+      signal(),
+    );
+    expect(streamed.output).toBe('2');
   });
 
-  it('supports JSONL input and filters starting with a dash', async () => {
-    await write('events.jsonl', '{"level":"info"}\n{"level":"error"}\n');
-
-    const result = await harness.services.dataCruncher.queryJson(
-      localPath('events.jsonl'),
-      { filter: '[inputs] | length' },
-      context,
+  it('protects filters beginning with a dash and skips a UTF-8 BOM', async () => {
+    const harness = await makeHarness();
+    await writeFile(
+      join(harness.root, 'bom.json'),
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{}')]),
     );
-    expect(result.output).toBe('1');
 
-    const literal = await harness.services.dataCruncher.queryJson(
-      localPath('events.jsonl'),
+    const result = await harness.application.services.dataCruncher.queryJson(
+      'bom.json',
       { filter: '-1' },
-      context,
+      signal(),
     );
-    expect(literal.output).toBe('-1\n-1');
+    expect(result.output).toBe('-1');
+    expect(result.warnings).toContain('A UTF-8 byte order mark was skipped.');
   });
 
-  it('cannot read parent process secrets through jq env', async () => {
-    process.env.DATA_CRUNCHER_SENTINEL_SECRET = 'super-secret-value';
-    try {
-      await write('data.json', '{}');
-      const result = await harness.services.dataCruncher.queryJson(
-        localPath('data.json'),
-        { filter: '[env | keys[], ($ENV | keys[])] | join(",")' },
-        context,
-      );
-      expect(result.output).not.toContain('SENTINEL');
-      expect(result.output).not.toContain('super-secret-value');
-      expect(result.output).not.toContain('API_KEYS');
-      expect(result.output).toContain('PATH');
-    } finally {
-      delete process.env.DATA_CRUNCHER_SENTINEL_SECRET;
-    }
+  it('rejects invalid filters, malformed JSON, binary input, and module directives', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}', 'utf8');
+    await writeFile(join(harness.root, 'invalid.json'), '{"broken":', 'utf8');
+    await writeFile(join(harness.root, 'binary.json'), Buffer.from([0x7b, 0x00, 0x7d]));
+
+    await expect(
+      harness.application.services.dataCruncher.queryJson('valid.json', { filter: '.[' }, signal()),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'invalid.json',
+        { filter: '.' },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      harness.application.services.dataCruncher.queryJson('binary.json', { filter: '.' }, signal()),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: 'import "../outside" as $outside; $outside' },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      harness.application.services.dataCruncher.queryJson('valid.json', { filter: '' }, signal()),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: '.', maxOutputBytes: 100 },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+
+    expect(() => assertNoModuleDirectives('{"import": .value, note: "include x"}')).not.toThrow();
   });
 
-  it('rejects invalid filters and malformed input separately', async () => {
-    await write('data.json', '{"a":1}');
-    await write('broken.json', '{"a":');
+  it('rejects direct import through the real capability path', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    await harness.application.services.toolchain.tooling();
 
     await expect(
-      harness.services.dataCruncher.queryJson(localPath('data.json'), { filter: '.[' }, context),
-    ).rejects.toMatchObject({ code: 'bad_request', message: 'The jq filter is not valid' });
-
-    await expect(
-      harness.services.dataCruncher.queryJson(localPath('broken.json'), { filter: '.' }, context),
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: filters.directImport },
+        signal(),
+      ),
     ).rejects.toMatchObject({ code: 'bad_request' });
   });
 
-  it('truncates at the byte budget and marks the result', async () => {
-    await write('big.json', JSON.stringify(Array.from({ length: 500 }, (_, index) => index)));
+  it('rejects direct include through the real capability path', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    await harness.application.services.toolchain.tooling();
 
-    const result = await harness.services.dataCruncher.queryJson(
-      localPath('big.json'),
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'valid.json',
+        { filter: filters.directInclude },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+  });
+
+  it('rejects jq 1.8 continued-comment import before external JSON can escape', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    const { version } = (await harness.application.services.toolchain.tooling()).jq;
+    const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10) || 0);
+
+    if (major > 1 || (major === 1 && minor >= 8)) {
+      const unguarded = await runRawJqFilter(harness, filters.continuedImport);
+      expect(unguarded).toMatchObject({ code: 0, timedOut: false, aborted: false });
+      expect(unguarded.stdout.trim()).toBe('"EXTERNAL_JSON_SECRET"');
+    }
+
+    const rejected = await harness.application.services.dataCruncher
+      .queryJson('valid.json', { filter: filters.continuedImport }, signal())
+      .catch((error: unknown) => error);
+    expect(rejected).toMatchObject({ code: 'bad_request' });
+    expect(JSON.stringify(rejected)).not.toContain('EXTERNAL_JSON_SECRET');
+  });
+
+  it('rejects jq 1.8 continued-comment include before an external module can escape', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'valid.json'), '{}\n', 'utf8');
+    const filters = await createExternalModuleFixture(harness);
+    const { version } = (await harness.application.services.toolchain.tooling()).jq;
+    const [major = 0, minor = 0] = version.split('.').map((part) => Number.parseInt(part, 10) || 0);
+
+    if (major > 1 || (major === 1 && minor >= 8)) {
+      const unguarded = await runRawJqFilter(harness, filters.continuedInclude);
+      expect(unguarded).toMatchObject({ code: 0, timedOut: false, aborted: false });
+      expect(unguarded.stdout.trim()).toBe('"EXTERNAL_JQ_MODULE"');
+    }
+
+    const rejected = await harness.application.services.dataCruncher
+      .queryJson('valid.json', { filter: filters.continuedInclude }, signal())
+      .catch((error: unknown) => error);
+    expect(rejected).toMatchObject({ code: 'bad_request' });
+    expect(JSON.stringify(rejected)).not.toContain('EXTERNAL_JQ_MODULE');
+  });
+
+  it('keeps jq 1.7-compatible comments, escaped strings, fields, and interpolation', async () => {
+    const harness = await makeHarness();
+    await writeFile(
+      join(harness.root, 'keywords.json'),
+      '{"import":"field value","include":"interpolated value"}\n',
+      'utf8',
+    );
+    const result = await harness.application.services.dataCruncher.queryJson(
+      'keywords.json',
+      {
+        filter:
+          '# import and include are ordinary comment text\n' +
+          '{note: "import \\"include\\" and \\\\ path", imported: .import, rendered: "\\(.include)"}',
+      },
+      signal(),
+    );
+
+    expect(JSON.parse(result.output)).toEqual({
+      note: 'import "include" and \\ path',
+      imported: 'field value',
+      rendered: 'interpolated value',
+    });
+  });
+
+  it('truncates only at complete jq result boundaries', async () => {
+    const harness = await makeHarness({
+      MAX_OUTPUT_BYTES: '4096',
+      DEFAULT_OUTPUT_BYTES: '1024',
+    });
+    await writeFile(
+      join(harness.root, 'many.json'),
+      JSON.stringify(Array.from({ length: 1000 }, (_, index) => ({ index, state: 'ready' }))),
+      'utf8',
+    );
+
+    const result = await harness.application.services.dataCruncher.queryJson(
+      'many.json',
       { filter: '.[]', maxOutputBytes: 1024 },
-      context,
+      signal(),
     );
     expect(result.truncated).toBe(true);
     expect(result.returnedBytes).toBeLessThanOrEqual(1024);
-    expect(result.warnings.join(' ')).toContain('truncated');
-    expect(result.output.endsWith('\n')).toBe(false);
-  });
-
-  it('fails with a typed error when a single value cannot be truncated safely', async () => {
-    await write('big.json', JSON.stringify({ blob: 'x'.repeat(20_000) }));
-
-    await expect(
-      harness.services.dataCruncher.queryJson(
-        localPath('big.json'),
-        { filter: '.', maxOutputBytes: 1024 },
-        context,
-      ),
-    ).rejects.toMatchObject({ code: 'output_limit' });
-  });
-
-  it('rejects binary and non-UTF-8 input', async () => {
-    await write('binary.json', Buffer.from([0x7b, 0x00, 0x01, 0x7d]));
-    await write('utf16.json', Buffer.from([0xff, 0xfe, 0x7b, 0x00]));
-
-    await expect(
-      harness.services.dataCruncher.queryJson(localPath('binary.json'), { filter: '.' }, context),
-    ).rejects.toMatchObject({ code: 'bad_request' });
-    await expect(
-      harness.services.dataCruncher.queryJson(localPath('utf16.json'), { filter: '.' }, context),
-    ).rejects.toMatchObject({ code: 'bad_request' });
-  });
-
-  it('skips a UTF-8 byte order mark', async () => {
-    await write(
-      'bom.json',
-      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"a":1}')]),
-    );
-
-    const result = await harness.services.dataCruncher.queryJson(
-      localPath('bom.json'),
-      { filter: '.a' },
-      context,
-    );
-    expect(result.output).toBe('1');
-    expect(result.warnings.join(' ')).toContain('byte order mark');
-  });
-
-  it('refuses jq module directives that would read files outside the input', async () => {
-    await write('data.json', '{"a":1}');
-    const outside = join(harness.tempDir, 'modules');
-    await mkdir(outside, { recursive: true });
-    await writeFile(join(outside, 'secret.json'), '{"password":"hunter2"}');
-    const search = outside.replace(/\\/g, '/');
-
-    for (const filter of [
-      `import "secret" as $s {search: "${search}"}; $s`,
-      `include "secret" {search: "${search}"}; .`,
-      `  #comment\n import "secret" as $s {search: "${search}"}; $s`,
-    ]) {
-      const failure = await harness.services.dataCruncher
-        .queryJson(localPath('data.json'), { filter }, context)
-        .then((result) => result.output)
-        .catch((error: unknown) => error as { code?: string; message?: string });
-      expect(failure).toMatchObject({ code: 'bad_request' });
-      expect(JSON.stringify(failure)).not.toContain('hunter2');
+    for (const line of result.output.split('\n')) {
+      expect(() => {
+        JSON.parse(line);
+      }).not.toThrow();
     }
   });
 
-  it('still allows fields and strings named import or include', async () => {
-    await write('data.json', '{"import":{"id":7},"include":2}');
+  it('rejects a single jq value that cannot be safely truncated', async () => {
+    const harness = await makeHarness({
+      MAX_OUTPUT_BYTES: '4096',
+      DEFAULT_OUTPUT_BYTES: '1024',
+    });
+    await writeFile(
+      join(harness.root, 'large-value.json'),
+      JSON.stringify('x'.repeat(5000)),
+      'utf8',
+    );
 
-    expect(
-      (
-        await harness.services.dataCruncher.queryJson(
-          localPath('data.json'),
-          { filter: '.import.id + .include' },
-          context,
-        )
-      ).output,
-    ).toBe('9');
-    expect(
-      (
-        await harness.services.dataCruncher.queryJson(
-          localPath('data.json'),
-          { filter: '"import include"' },
-          context,
-        )
-      ).output,
-    ).toBe('"import include"');
-  });
-
-  it('rejects filters longer than the configured maximum', async () => {
-    await write('data.json', '{}');
     await expect(
-      harness.services.dataCruncher.queryJson(
-        localPath('data.json'),
-        { filter: '.'.repeat(harness.config.limits.maxFilterLength + 1) },
-        context,
+      harness.application.services.dataCruncher.queryJson(
+        'large-value.json',
+        { filter: '.', maxOutputBytes: 1024 },
+        signal(),
       ),
-    ).rejects.toMatchObject({ code: 'bad_request' });
+    ).rejects.toMatchObject({ code: 'limit_exceeded' });
   });
 });
 
-describe('ripgrep searches', () => {
-  it('returns matches with line numbers and scanned bytes', async () => {
-    const contents = 'INFO started\nERROR first\nWARN retry\nERROR second\n';
-    await write('app.log', contents);
+describe('ripgrep bounded log search', () => {
+  it('returns matching lines in source order with one-based line numbers', async () => {
+    const harness = await makeHarness();
+    await writeFile(
+      join(harness.root, 'runtime.log'),
+      'boot\nlistener address=0.0.0.0 port=3000\nnoise\nreadiness port=8080 refused\n',
+      'utf8',
+    );
 
-    const result = await harness.services.dataCruncher.ripgrep(
-      localPath('app.log'),
-      { pattern: '^ERROR', maxResults: 10 },
-      context,
+    const result = await harness.application.services.dataCruncher.ripgrep(
+      'runtime.log',
+      { pattern: 'listener|readiness', maxResults: 2 },
+      signal(),
     );
     expect(result.matches).toEqual([
-      { lineNumber: 2, line: 'ERROR first', lineTruncated: false },
-      { lineNumber: 4, line: 'ERROR second', lineTruncated: false },
+      {
+        lineNumber: 2,
+        line: 'listener address=0.0.0.0 port=3000',
+        lineTruncated: false,
+      },
+      {
+        lineNumber: 4,
+        line: 'readiness port=8080 refused',
+        lineTruncated: false,
+      },
     ]);
-    expect(result.matchCount).toBe(2);
     expect(result.truncated).toBe(false);
-    expect(result.scannedBytes).toBe(Buffer.byteLength(contents));
   });
 
-  it('returns an empty result when nothing matches', async () => {
-    await write('app.log', 'INFO started\n');
-    const result = await harness.services.dataCruncher.ripgrep(
-      localPath('app.log'),
-      { pattern: 'missing', maxResults: 10 },
-      context,
+  it('reports truncation only when a match exists beyond maxResults', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'exact.log'), 'ERROR one\nERROR two\n', 'utf8');
+    await writeFile(
+      join(harness.root, 'additional.log'),
+      'ERROR one\nERROR two\nERROR three\n',
+      'utf8',
     );
-    expect(result).toMatchObject({ matches: [], matchCount: 0, truncated: false });
+
+    const exact = await harness.application.services.dataCruncher.ripgrep(
+      'exact.log',
+      { pattern: 'ERROR', maxResults: 2 },
+      signal(),
+    );
+    expect(exact).toMatchObject({ matchCount: 2, truncated: false, warnings: [] });
+
+    const additional = await harness.application.services.dataCruncher.ripgrep(
+      'additional.log',
+      { pattern: 'ERROR', maxResults: 2 },
+      signal(),
+    );
+    expect(additional.matchCount).toBe(2);
+    expect(additional.matches.map((match) => match.line)).toEqual(['ERROR one', 'ERROR two']);
+    expect(additional.truncated).toBe(true);
+    expect(additional.warnings).toContain(
+      'Result limit reached; narrow the pattern or raise maxResults.',
+    );
   });
 
-  it('bounds the number of matches and reports truncation', async () => {
-    await write('many.log', Array.from({ length: 50 }, (_, index) => `ERROR ${index}`).join('\n'));
-
-    const result = await harness.services.dataCruncher.ripgrep(
-      localPath('many.log'),
-      { pattern: 'ERROR', maxResults: 5 },
-      context,
+  it('bounds match count, line length, and process output', async () => {
+    const harness = await makeHarness({
+      MAX_LINE_LENGTH: '64',
+      MAX_OUTPUT_BYTES: '1024',
+      DEFAULT_OUTPUT_BYTES: '1024',
+      MAX_MATCHES: '100',
+    });
+    const line = `ERROR ${'x'.repeat(500)}`;
+    await writeFile(
+      join(harness.root, 'bounded.log'),
+      Array.from({ length: 50 }, () => line).join('\n'),
+      'utf8',
     );
-    expect(result.matchCount).toBe(5);
+
+    const result = await harness.application.services.dataCruncher.ripgrep(
+      'bounded.log',
+      { pattern: 'ERROR', maxResults: 100 },
+      signal(),
+    );
+    expect(result.matches.length).toBeGreaterThan(0);
+    expect(result.matches.every((match) => match.line.length <= 64)).toBe(true);
     expect(result.truncated).toBe(true);
-    expect(result.warnings.join(' ')).toContain('Result limit');
+    expect(result.warnings.join(' ')).toMatch(/byte limit|Result limit/u);
   });
 
-  it('clips excessively long lines', async () => {
-    await write('long.log', `ERROR ${'x'.repeat(50_000)}\n`);
-
-    const result = await harness.services.dataCruncher.ripgrep(
-      localPath('long.log'),
-      { pattern: 'ERROR', maxResults: 5 },
-      context,
+  it('marks the configured result ceiling and handles no matches', async () => {
+    const harness = await makeHarness({ MAX_MATCHES: '2' });
+    await writeFile(
+      join(harness.root, 'events.log'),
+      'ERROR one\nERROR two\nERROR three\n',
+      'utf8',
     );
-    const [match] = result.matches;
-    expect(match).toBeDefined();
-    expect(match!.line.length).toBeLessThanOrEqual(harness.config.limits.maxLineLength);
+
+    const limited = await harness.application.services.dataCruncher.ripgrep(
+      'events.log',
+      { pattern: 'ERROR', maxResults: 50 },
+      signal(),
+    );
+    expect(limited.matchCount).toBe(2);
+    expect(limited.truncated).toBe(true);
+    expect(limited.warnings.join(' ')).toMatch(/clamped|Result limit/u);
+
+    const empty = await harness.application.services.dataCruncher.ripgrep(
+      'events.log',
+      { pattern: 'NOTICE', maxResults: 10 },
+      signal(),
+    );
+    expect(empty).toMatchObject({ matches: [], matchCount: 0, truncated: false });
   });
 
-  it('rejects invalid patterns and binary input', async () => {
-    await write('app.log', 'line\n');
-    await write('binary.log', Buffer.from([0x41, 0x00, 0x42]));
+  it('returns a deterministic sanitized invalid-pattern error', async () => {
+    const harness = await makeHarness();
+    await writeFile(join(harness.root, 'events.log'), 'ERROR one\n', 'utf8');
 
+    const request = harness.application.services.dataCruncher.ripgrep(
+      'events.log',
+      { pattern: '[', maxResults: 10 },
+      signal(),
+    );
+    const error = await request.catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'bad_request', message: 'ripgrep rejected the pattern' });
+    expect(JSON.stringify(error)).not.toContain(harness.root);
     await expect(
-      harness.services.dataCruncher.ripgrep(
-        localPath('app.log'),
-        { pattern: '[', maxResults: 5 },
-        context,
+      harness.application.services.dataCruncher.ripgrep(
+        'events.log',
+        { pattern: 'ERROR', maxResults: 0 },
+        signal(),
       ),
     ).rejects.toMatchObject({ code: 'bad_request' });
-    await expect(
-      harness.services.dataCruncher.ripgrep(
-        localPath('binary.log'),
-        { pattern: 'A', maxResults: 5 },
-        context,
-      ),
-    ).rejects.toMatchObject({ code: 'bad_request' });
-  });
-
-  it('does not leak absolute paths in error details', async () => {
-    await write('app.log', 'line\n');
-    const failure = await harness.services.dataCruncher
-      .ripgrep(localPath('app.log'), { pattern: '(', maxResults: 5 }, context)
-      .then(() => undefined)
-      .catch((error: unknown) => error as { details?: unknown });
-    expect(failure).toBeDefined();
-    expect(JSON.stringify(failure?.details ?? {})).not.toContain(harness.dataRoot);
   });
 });
 
-describe('data references', () => {
-  it('reads uploaded assets and removes the temporary copy', async () => {
-    const metadata = await assets.put({
-      principal: 'key:1',
-      filename: 'orders.json',
-      contentType: 'application/json',
-      body: (await import('node:stream')).Readable.from([
-        Buffer.from(JSON.stringify({ total: 42 })),
-      ]),
+describe('process and filesystem security boundaries', () => {
+  it('gives jq only a minimal scratch-scoped environment with no ambient secrets', async () => {
+    const inherited = {
+      DATA_CRUNCHER_PARENT_SECRET: process.env['DATA_CRUNCHER_PARENT_SECRET'],
+      API_KEYS: process.env['API_KEYS'],
+      AZURE_CLIENT_SECRET: process.env['AZURE_CLIENT_SECRET'],
+      NODE_OPTIONS: process.env['NODE_OPTIONS'],
+      JQ_LIBRARY_PATH: process.env['JQ_LIBRARY_PATH'],
+      RIPGREP_CONFIG_PATH: process.env['RIPGREP_CONFIG_PATH'],
+    };
+    Object.assign(process.env, {
+      DATA_CRUNCHER_PARENT_SECRET: 'must-not-reach-jq',
+      API_KEYS: 'must-not-reach-jq',
+      AZURE_CLIENT_SECRET: 'must-not-reach-jq',
+      NODE_OPTIONS: '--no-warnings',
+      JQ_LIBRARY_PATH: resolve('must-not-reach-jq'),
+      RIPGREP_CONFIG_PATH: resolve('must-not-reach-jq'),
     });
 
-    const result = await harness.services.dataCruncher.queryJson(
-      { kind: 'asset', assetId: metadata.assetId },
-      { filter: '.total' },
-      context,
-    );
-    expect(result.output).toBe('42');
-  });
-
-  it('refuses assets owned by another principal', async () => {
-    const metadata = await assets.put({
-      principal: 'key:2',
-      filename: 'orders.json',
-      contentType: 'application/json',
-      body: (await import('node:stream')).Readable.from([Buffer.from('{}')]),
-    });
-
-    await expect(
-      harness.services.dataCruncher.queryJson(
-        { kind: 'asset', assetId: metadata.assetId },
-        { filter: '.' },
-        context,
-      ),
-    ).rejects.toMatchObject({ code: 'bad_request' });
-  });
-
-  it('contains local paths inside the configured roots', async () => {
-    const outside = join(harness.tempDir, 'outside.json');
-    await writeFile(outside, '{"secret":true}');
-
-    await expect(
-      harness.services.dataCruncher.queryJson(
-        localPath('../outside.json'),
-        { filter: '.' },
-        context,
-      ),
-    ).rejects.toMatchObject({ code: 'bad_request' });
-    await expect(
-      harness.services.dataCruncher.ripgrep(
-        localPath(outside),
-        { pattern: 'secret', maxResults: 1 },
-        context,
-      ),
-    ).rejects.toMatchObject({ code: 'forbidden' });
-    await expect(
-      harness.services.dataCruncher.queryJson(localPath('.'), { filter: '.' }, context),
-    ).rejects.toMatchObject({ code: 'forbidden' });
-  });
-
-  it('rejects symlinks that escape the data root', async () => {
-    const target = join(harness.tempDir, 'outside.json');
-    await writeFile(target, '{"secret":true}');
     try {
-      await symlink(target, join(harness.dataRoot, 'link.json'));
-    } catch {
-      return; // symlink creation requires privileges on some platforms
-    }
-
-    await expect(
-      harness.services.dataCruncher.queryJson(localPath('link.json'), { filter: '.' }, context),
-    ).rejects.toMatchObject({ code: 'forbidden' });
-  });
-
-  it('refuses local paths when they are disabled', async () => {
-    const disabled = await createHarness({ env: { LOCAL_PATHS_ENABLED: 'false' } });
-    try {
-      await expect(
-        disabled.services.dataCruncher.queryJson(localPath('data.json'), { filter: '.' }, context),
-      ).rejects.toMatchObject({ code: 'forbidden' });
-    } finally {
-      await disabled.dispose();
-    }
-  });
-
-  it('rejects files larger than the configured maximum', async () => {
-    const small = await createHarness({ env: { MAX_FILE_BYTES: 1024 } });
-    try {
-      await writeFile(join(small.dataRoot, 'big.json'), JSON.stringify({ x: 'y'.repeat(4096) }));
-      await expect(
-        small.services.dataCruncher.queryJson(localPath('big.json'), { filter: '.' }, context),
-      ).rejects.toMatchObject({ code: 'payload_too_large' });
-    } finally {
-      await small.dispose();
-    }
-  });
-});
-
-describe('execution bounds', () => {
-  it('reports unresolvable tooling as an upstream failure, not an internal error', async () => {
-    // A binary that is absent, unreadable or too old is an operational failure of this server.
-    const broken = await createHarness();
-    try {
-      const runtime = broken.runtime as unknown as {
-        executables: () => Promise<never>;
-      };
-      runtime.executables = () =>
-        Promise.reject(new ExecutableResolutionError('jq was not found on PATH'));
-
-      await writeFile(join(broken.dataRoot, 'data.json'), '{}');
-      await expect(
-        broken.services.dataCruncher.queryJson(localPath('data.json'), { filter: '.' }, context),
-      ).rejects.toMatchObject({ code: 'upstream_error', retryable: true });
-    } finally {
-      await broken.dispose();
-    }
-  });
-
-  it('rejects work when the queue is saturated', async () => {
-    const saturated = await createHarness({
-      env: { TOOL_CONCURRENCY: 1, TOOL_QUEUE_LIMIT: 0 },
-    });
-    try {
-      await writeFile(
-        join(saturated.dataRoot, 'big.json'),
-        JSON.stringify(Array.from({ length: 20_000 }, (_, index) => ({ index }))),
-      );
-      const first = saturated.services.dataCruncher.queryJson(
-        localPath('big.json'),
-        { filter: '[.[].index] | add' },
-        context,
-      );
-      const second = saturated.services.dataCruncher.queryJson(
-        localPath('big.json'),
-        { filter: '.' },
-        context,
-      );
-      await expect(second).rejects.toMatchObject({ code: 'busy', retryable: true });
-      await first.catch(() => undefined);
-    } finally {
-      await saturated.dispose();
-    }
-  });
-
-  it('stops execution when the caller aborts', async () => {
-    await write('data.json', '{"a":1}');
-    const controller = new AbortController();
-    controller.abort();
-
-    await expect(
-      harness.services.dataCruncher.queryJson(
-        localPath('data.json'),
-        { filter: '.' },
+      const harness = await makeHarness();
+      await writeFile(join(harness.root, 'value.json'), '{}', 'utf8');
+      const result = await harness.application.services.dataCruncher.queryJson(
+        'value.json',
         {
-          ...context,
-          signal: controller.signal,
+          filter:
+            '{parent: (env | has("DATA_CRUNCHER_PARENT_SECRET")), api: (env | has("API_KEYS")), azure: (env | has("AZURE_CLIENT_SECRET")), node: (env | has("NODE_OPTIONS")), jq: (env | has("JQ_LIBRARY_PATH")), rg: (env | has("RIPGREP_CONFIG_PATH")), dollarParent: ($ENV | has("DATA_CRUNCHER_PARENT_SECRET")), home: env.HOME, tmp: env.TMP, keys: (env | keys)}',
         },
-      ),
-    ).rejects.toMatchObject({ code: 'busy' });
+        signal(),
+      );
+      const exposed = JSON.parse(result.output) as Record<string, unknown>;
+      expect(exposed).toMatchObject({
+        parent: false,
+        api: false,
+        azure: false,
+        node: false,
+        jq: false,
+        rg: false,
+        dollarParent: false,
+        home: harness.application.services.scratch.path,
+        tmp: harness.application.services.scratch.path,
+      });
+      const keys = exposed['keys'] as string[];
+      expect(keys).not.toEqual(
+        expect.arrayContaining([
+          'DATA_CRUNCHER_PARENT_SECRET',
+          'API_KEYS',
+          'AZURE_CLIENT_SECRET',
+          'NODE_OPTIONS',
+          'JQ_LIBRARY_PATH',
+          'RIPGREP_CONFIG_PATH',
+        ]),
+      );
+
+      const tooling = await harness.application.services.toolchain.tooling();
+      const allowed = [
+        'HOME',
+        'LANG',
+        'LC_ALL',
+        'PATH',
+        'TEMP',
+        'TMP',
+        'TMPDIR',
+        ...(process.platform === 'win32'
+          ? ['SystemRoot', 'windir'].filter((key) => process.env[key])
+          : []),
+      ].sort();
+      expect(Object.keys(tooling.environment).sort()).toEqual(allowed);
+    } finally {
+      for (const [key, value] of Object.entries(inherited)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
-  it('times out long running work', async () => {
-    const slow = await createHarness({ env: { SUBPROCESS_TIMEOUT_MS: 200 } });
-    try {
-      await writeFile(join(slow.dataRoot, 'data.json'), '{}');
-      await expect(
-        slow.services.dataCruncher.queryJson(
-          localPath('data.json'),
-          { filter: 'reduce range(0; 100000000) as $i (0; . + $i)' },
-          context,
-        ),
-      ).rejects.toMatchObject({ code: 'timeout' });
-    } finally {
-      await slow.dispose();
-    }
+  it('rejects absolute paths, traversal, directories, oversized files, and symlink escapes', async () => {
+    const harness = await makeHarness({ MAX_FILE_BYTES: '1024' });
+    await writeFile(join(harness.root, 'valid.json'), '{}', 'utf8');
+    await writeFile(join(harness.root, 'too-large.json'), 'x'.repeat(2048), 'utf8');
+    const outside = join(harness.base, 'outside');
+    await mkdir(outside);
+    await writeFile(join(outside, 'secret.json'), '{"secret":true}', 'utf8');
+    const link = join(harness.root, 'outside-link');
+    await symlink(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+
+    const query = (path: string) =>
+      harness.application.services.dataCruncher.queryJson(path, { filter: '.' }, signal());
+    await expect(query(resolve(harness.root, 'valid.json'))).rejects.toMatchObject({
+      code: 'bad_request',
+    });
+    await expect(query('../outside/secret.json')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(query('.')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(query('too-large.json')).rejects.toMatchObject({ code: 'limit_exceeded' });
+    await expect(query('outside-link/secret.json')).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('streams the opened object even when its addressed path is replaced', async () => {
+    const harness = await makeHarness();
+    const addressed = join(harness.root, 'race.json');
+    const archived = join(harness.root, 'original.json');
+    const original = '{"value":"original"}\n';
+    await writeFile(addressed, original, 'utf8');
+
+    const runner: DataProcessRunner = {
+      async run(name, args, stdin) {
+        void name;
+        void args;
+        await rename(addressed, archived);
+        await writeFile(addressed, '{"value":"replacement"}\n', 'utf8');
+        const chunks: Buffer[] = [];
+        for await (const chunk of stdin) {
+          if (!Buffer.isBuffer(chunk)) throw new Error('Expected a buffer');
+          chunks.push(chunk);
+        }
+        const content = Buffer.concat(chunks).toString('utf8');
+        return completedProcess(content, Buffer.byteLength(content));
+      },
+    };
+    const service = new DataCruncherService(
+      harness.application.config.execution.limits,
+      harness.application.services.workspace,
+      new BoundedQueue(1, 0, 'race proof'),
+      runner,
+    );
+    const result = await service.queryJson('race.json', { filter: '.' }, signal());
+    expect(JSON.parse(result.output)).toEqual({ value: 'original' });
+  });
+
+  it('streams a representative multi-megabyte input while returning bounded evidence', async () => {
+    const harness = await makeHarness({ MAX_FILE_BYTES: String(16 * 1024 * 1024) });
+    const middle = 'ordinary runtime event\n'.repeat(220_000);
+    const content = `listener port=3000\n${middle}readiness port=8080 refused\n`;
+    await writeFile(join(harness.root, 'large.log'), content, 'utf8');
+
+    const result = await harness.application.services.dataCruncher.ripgrep(
+      'large.log',
+      { pattern: 'listener|readiness', maxResults: 10 },
+      signal(),
+    );
+    expect(result.scannedBytes).toBe(Buffer.byteLength(content));
+    expect(result.scannedBytes).toBeGreaterThan(4 * 1024 * 1024);
+    expect(result.matches.map((match) => match.line)).toEqual([
+      'listener port=3000',
+      'readiness port=8080 refused',
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(2048);
+  });
+
+  it('enforces queue admission, timeout, cancellation, and executable failures', async () => {
+    const harness = await makeHarness({
+      SUBPROCESS_TIMEOUT_MS: '100',
+      TOOL_CONCURRENCY: '1',
+      TOOL_QUEUE_LIMIT: '0',
+    });
+    await writeFile(join(harness.root, 'value.json'), '{}', 'utf8');
+
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolveBlocked) => {
+      release = resolveBlocked;
+    });
+    const running = new Promise<void>((resolveRunning) => {
+      entered = resolveRunning;
+    });
+    const runner: DataProcessRunner = {
+      async run() {
+        entered();
+        await blocked;
+        return completedProcess('{}\n', 2);
+      },
+    };
+    const queuedService = new DataCruncherService(
+      harness.application.config.execution.limits,
+      harness.application.services.workspace,
+      new BoundedQueue(1, 0, 'queue proof'),
+      runner,
+    );
+    const first = queuedService.queryJson('value.json', { filter: '.' }, signal());
+    await running;
+    await expect(
+      queuedService.queryJson('value.json', { filter: '.' }, signal()),
+    ).rejects.toMatchObject({ code: 'busy' });
+    release();
+    await first;
+
+    await expect(
+      harness.application.services.dataCruncher.queryJson(
+        'value.json',
+        { filter: 'reduce range(0; 1000000000) as $i (0; . + $i)' },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'timeout' });
+
+    const controller = new AbortController();
+    const cancelled = harness.application.services.dataCruncher.queryJson(
+      'value.json',
+      { filter: 'reduce range(0; 1000000000) as $i (0; . + $i)' },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 25);
+    await expect(cancelled).rejects.toMatchObject({ code: 'busy' });
+
+    const unavailable = await makeHarness({ JQ_PATH: join(harness.root, 'missing-jq') });
+    await writeFile(join(unavailable.root, 'value.json'), '{}', 'utf8');
+    await expect(
+      unavailable.application.services.dataCruncher.queryJson(
+        'value.json',
+        { filter: '.' },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: 'upstream_error' });
+  });
+
+  it('reports truthful readiness without exposing paths', async () => {
+    const harness = await makeHarness();
+    const report = await harness.application.readiness();
+    expect(report.ready).toBe(true);
+    expect(report.checks.map((check) => check.name).sort()).toEqual([
+      'data_capacity',
+      'data_root',
+      'data_tooling',
+      'registry',
+    ]);
+    expect(JSON.stringify(report)).not.toContain(harness.root);
+    expect(JSON.stringify(report)).not.toContain(harness.application.services.scratch.path);
   });
 });

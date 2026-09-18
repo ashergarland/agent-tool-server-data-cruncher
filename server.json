@@ -1,12 +1,20 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.ashergarland/agent-tool-server-data-cruncher",
-  "title": "Data Cruncher",
-  "description": "Query large JSON, JSONL and log files with jq and ripgrep and return only small results.",
-  "version": "0.1.0",
+  "description": "Reduce large local JSON, JSONL, log, and text files with bounded jq and ripgrep tools.",
   "repository": {
     "url": "https://github.com/ashergarland/agent-tool-server-data-cruncher",
     "source": "github"
   },
-  "websiteUrl": "https://github.com/ashergarland/agent-tool-server-data-cruncher#readme"
+  "version": "0.0.0-development",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-tool-server-data-cruncher",
+      "version": "0.0.0-development",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
 }

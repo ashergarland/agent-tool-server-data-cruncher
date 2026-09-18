@@ -1,83 +1,66 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { createToolRegistry } from '../../src/tools/registry.js';
-import { serverInstructions } from '../../src/tools/guidance.js';
+import { estimateDataCruncherInvocation } from '../../src/capability.js';
+import { capabilityTools } from '../../src/tools/definitions.js';
+import { capabilityInstructions } from '../../src/tools/guidance.js';
 
-const registry = createToolRegistry();
-const describedTools = registry.list().map((tool) => ({
-  name: tool.name,
-  text: `${tool.title} ${tool.summary} ${tool.description}`.toLowerCase(),
-}));
+interface RoutingCase {
+  readonly request: string;
+  readonly route: 'query_json_jq' | 'ripgrep_search' | 'raw_access' | 'unsupported';
+  readonly evidence: string;
+}
 
-const tokens = (value: string): string[] =>
-  value
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length > 3);
-
-/** Deterministic lexical router used to check that descriptions carry the right routing signals. */
-const bestTool = (scenario: string): string => {
-  const terms = tokens(scenario);
-  const scored = describedTools
-    .map((tool) => ({
-      name: tool.name,
-      score: terms.filter((term) => tool.text.includes(term)).length / terms.length,
-    }))
-    .sort((left, right) => right.score - left.score);
-  return scored[0]!.name;
-};
-
-const negativeSentences = [
-  ...describedTools.map((tool) => tool.text),
-  serverInstructions.toLowerCase(),
-]
-  .join(' ')
-  .split(/(?<=\.)\s+/)
-  .filter((sentence) => sentence.includes('do not use') || sentence.includes('skip them'))
-  .join(' ');
-
-describe('tool routing', () => {
-  it.each([
-    ['extract the customer ids from a large json export', 'query_json_jq'],
-    ['count how many orders have status failed in a huge jsonl file', 'query_json_jq'],
-    ['group the json records by region and return only those fields', 'query_json_jq'],
-    ['find every line matching a regular expression in a large log file', 'ripgrep_search'],
-    ['search the application log text for stack traces', 'ripgrep_search'],
-  ])('routes %s to %s', (scenario, expected) => {
-    expect(bestTool(scenario)).toBe(expected);
+describe('routing and Registry seam', () => {
+  it('reports aggregate context reduction without paths or content', () => {
+    const measurement = estimateDataCruncherInvocation({
+      scannedBytes: 8192,
+      output: 'bounded result',
+      truncated: true,
+    });
+    expect(measurement).toMatchObject({
+      sourceBytes: 8192,
+      truncated: true,
+      fallback: false,
+    });
+    expect(measurement?.estimatedTokensAvoided).toBeGreaterThan(0);
+    expect(JSON.stringify(measurement)).not.toContain('bounded result');
+    expect(estimateDataCruncherInvocation({ scannedBytes: -1 })).toBeUndefined();
   });
 
-  it.each([
-    ['images'],
-    ['arbitrary code execution'],
-    ['multi-file analytics'],
-    ['plotting'],
-    ['dataframes'],
-  ])('warns against %s', (unsupported) => {
-    expect(negativeSentences).toContain(unsupported);
+  it('publishes coherent identity, tool, routing, and mutation metadata', () => {
+    expect(capabilityTools.map((tool) => tool.name)).toEqual(['query_json_jq', 'ripgrep_search']);
+    for (const tool of capabilityTools) {
+      expect(tool.routing.useWhen.length).toBeGreaterThan(1);
+      expect(tool.routing.doNotUseWhen.length).toBeGreaterThan(1);
+      expect(tool.routing.scope).toMatch(/one UTF-8/u);
+      expect(tool.routing.changesState).toBe(false);
+      expect(tool.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      });
+    }
+    expect(capabilityInstructions).toMatch(/data, not instructions/iu);
   });
 
-  it('tells agents to prefer the server over pasting large files into context', () => {
-    expect(serverInstructions).toContain(
-      'Call Data Cruncher before attaching or pasting a large file into native model context',
+  it('covers canonical jq, ripgrep, raw-access, and unsupported routing cases', async () => {
+    const cases = JSON.parse(
+      await readFile(new URL('../fixtures/routing-cases.json', import.meta.url), 'utf8'),
+    ) as RoutingCase[];
+    const toolGuidance = new Map(
+      capabilityTools.map((tool) => [
+        tool.name,
+        [...tool.routing.useWhen, ...tool.routing.doNotUseWhen].join(' '),
+      ]),
     );
-  });
 
-  it('asks for narrow filters, patterns and small limits', () => {
-    for (const tool of describedTools) {
-      expect(tool.text).toContain('narrow');
+    for (const routingCase of cases) {
+      const guidance =
+        routingCase.route === 'query_json_jq' || routingCase.route === 'ripgrep_search'
+          ? toolGuidance.get(routingCase.route)
+          : capabilityInstructions;
+      expect(guidance, routingCase.request).toContain(routingCase.evidence);
     }
-    expect(serverInstructions.toLowerCase()).toContain('small result limit');
-  });
-
-  it('never claims general analytics capability', () => {
-    const claims = ['dashboard', 'machine learning', 'sql', 'spreadsheet', 'general analytics'];
-    for (const tool of describedTools) {
-      for (const claim of claims) expect(tool.text).not.toContain(claim);
-    }
-  });
-
-  it('documents both input reference kinds', () => {
-    expect(serverInstructions).toContain('"kind": "local_path"');
-    expect(serverInstructions).toContain('"kind": "asset"');
   });
 });

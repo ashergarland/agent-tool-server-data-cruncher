@@ -2,6 +2,5 @@
   "id": "agent-tool-server-data-cruncher",
   "repository": "https://github.com/ashergarland/agent-tool-server-data-cruncher",
   "serverMetadata": "server.json",
-  "categories": ["developer-tools", "data"],
-  "installation": "clone-and-build"
+  "categories": ["developer-tools", "data"]
 }

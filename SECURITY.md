@@ -3,18 +3,16 @@
 Report vulnerabilities privately through GitHub Security Advisories for this repository. Do not
 open a public issue for an undisclosed vulnerability.
 
-[docs/threat-model.md](docs/threat-model.md) documents the trust boundaries, the subprocess
-isolation rules and the residual risks.
+[`docs/threat-model.md`](docs/threat-model.md) documents the local filesystem, child process, and
+resource boundaries.
 
-Deployments must enable authentication, store credentials in a secret manager, use least-privilege
-provider roles, keep local filesystem access disabled unless it is needed, mount data roots read
-only, keep asset containers private with managed identity, and review dependency and container
-findings before release.
+Two properties must not be weakened:
 
-Two properties are load bearing and must not be weakened:
+1. jq and ripgrep receive an environment constructed from an allowlist, with lifecycle scratch for
+   `HOME` and temporary state. jq module directives remain refused.
+2. Caller paths never reach a child process. Platform confines and opens the file, and Data Cruncher
+   streams that descriptor through stdin.
 
-1. Child processes receive a constructed allowlist environment, and jq filters may not use module
-   directives. `jq` can read its environment and can load files named by the program itself, so
-   either gap would hand callers application secrets or files outside the requested input.
-2. Callers never supply a path to a child process. Input is validated, opened, and streamed to the
-   child through stdin.
+Operators should expose only the intended read-only data root, use reviewed jq/ripgrep binaries,
+keep limits bounded, and review dependency findings before release. This repository does not
+declare a hosted or multi-tenant deployment profile.

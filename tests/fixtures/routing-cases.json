@@ -1,0 +1,32 @@
+[
+  {
+    "request": "Count failed records in a 500 MB JSONL file and return the owning service names.",
+    "route": "query_json_jq",
+    "evidence": "counting"
+  },
+  {
+    "request": "Project listener and readiness ports from structured deployment diagnostics.",
+    "route": "query_json_jq",
+    "evidence": "structured deployment diagnostics"
+  },
+  {
+    "request": "Find connection-refused readiness lines in a large deployment log in source order.",
+    "route": "ripgrep_search",
+    "evidence": "source chronology"
+  },
+  {
+    "request": "Locate error and listener observations in a multi-megabyte runtime log.",
+    "route": "ripgrep_search",
+    "evidence": "listener"
+  },
+  {
+    "request": "Show the exact complete contents of this small 20-line file.",
+    "route": "raw_access",
+    "evidence": "full-file access"
+  },
+  {
+    "request": "Join six CSVs, train a model, and render a chart.",
+    "route": "unsupported",
+    "evidence": "cross-file analytics"
+  }
+]
