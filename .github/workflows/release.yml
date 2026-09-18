@@ -1,0 +1,15 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  capability:
+    uses: ashergarland/agent-tool-platform/.github/workflows/capability-release.yml@98ec8162fb11d5c04aee9e6f7b3625a472a0180d
+    secrets: inherit

@@ -1,73 +1,61 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import pino from 'pino';
-import { buildConfig, envSchema, type AppConfig } from '../../src/config/index.js';
-import { createRuntime, type Runtime } from '../../src/runtime/index.js';
-import { createHttpServer } from '../../src/server/http.js';
-import type { HttpServer } from '../../src/server/types.js';
-import { createServices, type Services } from '../../src/services/index.js';
-import type { AssetStore } from '../../src/services/assets/index.js';
-import { createToolRegistry } from '../../src/tools/registry.js';
+import {
+  createAgentToolApplication,
+  type AgentToolApplication,
+} from '@agent-tool-platform/runtime/capability';
+import { createSilentLogger } from '@agent-tool-platform/runtime/logging';
+import { capability } from '../../src/capability.js';
+import type { DataCruncherConfig } from '../../src/config/index.js';
+import type { DataCruncherServices } from '../../src/services/index.js';
 
-export const apiKey = 'test-api-key-that-is-at-least-32-characters';
+export type DataCruncherApplication = AgentToolApplication<
+  DataCruncherConfig,
+  DataCruncherServices
+>;
 
-export const testConfig = (overrides: Record<string, unknown> = {}): AppConfig =>
-  buildConfig(
-    envSchema.parse({
+export interface DataHarness {
+  readonly application: DataCruncherApplication;
+  readonly root: string;
+  readonly scratchParent: string;
+  readonly base: string;
+  cleanup(): Promise<void>;
+}
+
+export interface CreateHarnessOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly start?: boolean;
+}
+
+export const createHarness = async (options: CreateHarnessOptions = {}): Promise<DataHarness> => {
+  const base = await mkdtemp(join(tmpdir(), 'data-cruncher-test-'));
+  const root = join(base, 'data');
+  const scratchParent = join(base, 'scratch');
+  await Promise.all([mkdir(root, { recursive: true }), mkdir(scratchParent, { recursive: true })]);
+
+  const application = await createAgentToolApplication(capability, {
+    logger: createSilentLogger(),
+    env: {
       NODE_ENV: 'test',
-      AUTH_MODE: 'api-key',
-      API_KEYS: apiKey,
-      RATE_LIMIT_MAX: 120,
-      ...overrides,
-    }),
-  );
-
-export interface Harness {
-  readonly config: AppConfig;
-  readonly runtime: Runtime;
-  readonly services: Services;
-  readonly dataRoot: string;
-  readonly tempDir: string;
-  readonly app: HttpServer;
-  dispose(): Promise<void>;
-}
-
-export interface HarnessOptions {
-  readonly env?: Record<string, unknown>;
-  readonly assetStore?: AssetStore;
-  readonly http?: boolean;
-}
-
-/** Creates an isolated configuration, runtime and (optionally) HTTP server backed by temp dirs. */
-export const createHarness = async (options: HarnessOptions = {}): Promise<Harness> => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'dc-data-'));
-  const tempDir = await mkdtemp(join(tmpdir(), 'dc-temp-'));
-  const config = testConfig({ DATA_ROOT: dataRoot, TEMP_DIR: tempDir, ...options.env });
-  const runtime = createRuntime(config);
-  const services = createServices(config, {
-    runtime,
-    ...(options.assetStore ? { assetStore: options.assetStore } : {}),
+      AUTH_MODE: 'disabled',
+      DATA_ROOT: root,
+      TEMP_DIR: scratchParent,
+      ...options.env,
+    },
+    readinessCacheMs: 0,
+    drainTimeoutMs: 5000,
   });
-  const app = createHttpServer({
-    config,
-    logger: pino({ level: 'silent' }),
-    services,
-    registry: createToolRegistry(),
-  });
+  if (options.start !== false) await application.start();
 
   return {
-    config,
-    runtime,
-    services,
-    dataRoot,
-    tempDir,
-    app,
-    dispose: async () => {
-      await app.close();
-      await runtime.close();
-      await rm(dataRoot, { recursive: true, force: true });
-      await rm(tempDir, { recursive: true, force: true });
+    application,
+    root,
+    scratchParent,
+    base,
+    async cleanup() {
+      await application.shutdown();
+      await rm(base, { recursive: true, force: true });
     },
   };
 };

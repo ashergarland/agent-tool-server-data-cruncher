@@ -1,34 +1,45 @@
-import type { AppConfig } from '../config/index.js';
-import { createRuntime, type Runtime } from '../runtime/index.js';
-import { createAssetStore, type AssetStore } from './assets/index.js';
-import { DataCruncherService } from './data-cruncher.js';
+import { BoundedQueue } from '@agent-tool-platform/runtime/concurrency';
+import type { CapabilityContext } from '@agent-tool-platform/runtime/capability';
+import { RootBoundary } from '@agent-tool-platform/runtime/fs';
+import type { ScratchWorkspace } from '@agent-tool-platform/runtime/lifecycle';
+import type { DataCruncherConfig } from '../config/index.js';
+import { DataCruncherService } from '../domain/data-cruncher.js';
+import { DataToolchain } from '../domain/toolchain.js';
 
-export type {
-  DataReference,
-  JsonQueryResult,
-  RipgrepMatch,
-  RipgrepResult,
-} from './data-cruncher.js';
-export { DataCruncherService } from './data-cruncher.js';
-
-export interface Services {
-  readonly runtime: Runtime;
-  readonly assets: AssetStore;
+export interface DataCruncherServices {
   readonly dataCruncher: DataCruncherService;
+  readonly workspace: RootBoundary;
+  readonly queue: BoundedQueue;
+  readonly toolchain: DataToolchain;
+  readonly scratch: ScratchWorkspace;
 }
 
-export interface CreateServicesOptions {
-  readonly runtime?: Runtime;
-  readonly assetStore?: AssetStore;
-}
-
-export const createServices = (
-  config: AppConfig,
-  options: CreateServicesOptions = {},
-): Services => {
-  const runtime = options.runtime ?? createRuntime(config);
-  const assets =
-    options.assetStore ??
-    createAssetStore(config, async () => (await runtime.workspace()).materializeDir);
-  return { runtime, assets, dataCruncher: new DataCruncherService(config, runtime, assets) };
+export const createDataCruncherServices = async (
+  context: CapabilityContext<DataCruncherConfig>,
+): Promise<DataCruncherServices> => {
+  const { config } = context;
+  const scratch = await context.createScratchWorkspace({
+    prefix: 'data-cruncher-',
+    ...(config.execution.tempDir === undefined
+      ? {}
+      : { parentDirectory: config.execution.tempDir }),
+  });
+  const workspace = new RootBoundary({
+    root: config.data.root,
+    requireRegularFile: true,
+    maxFileBytes: config.execution.limits.maxFileBytes,
+  });
+  const queue = new BoundedQueue(
+    config.execution.limits.toolConcurrency,
+    config.execution.limits.toolQueueLimit,
+    'data reduction work',
+  );
+  const toolchain = new DataToolchain(config, scratch.path);
+  const dataCruncher = new DataCruncherService(
+    config.execution.limits,
+    workspace,
+    queue,
+    toolchain,
+  );
+  return { dataCruncher, workspace, queue, toolchain, scratch };
 };

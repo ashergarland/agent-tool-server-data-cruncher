@@ -1,16 +1,34 @@
 # Contributing
 
-Use Node.js 22 and install with `npm ci`. `jq` and ripgrep must be on `PATH` to run the tests.
+Use Node.js 22 or newer. jq 1.7+ and ripgrep 14+ must be available on `PATH` for domain and package
+tests.
 
-Keep process execution out of transports and every exposed tool in the shared typed registry. Child
-processes must keep receiving a constructed allowlist environment and must keep receiving their
-input on stdin rather than as a path argument; both properties are covered by tests and documented
-in `docs/threat-model.md`.
+```bash
+npm ci
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test:coverage
+npm run build
+npm run metadata:validate
+npm run package:smoke
+```
 
-Tests must cover validation, path containment, execution limits, asset isolation, command failures
-and the generated transport surfaces. Use temporary fixtures and fake asset stores; tests must never
-require Azure or network access.
+Keep the capability narrow. Tool schemas, routing, jq/ripgrep policy, and domain parsing belong
+here. Application assembly, transports, auth, lifecycle, generic process/filesystem safety,
+metadata validation, and release mechanics belong to Agent Tool Platform.
 
-Before opening a pull request, run the complete validation list in `README.md`. Never commit `.env`
-files, deployment outputs, credentials, tenant/subscription identifiers, uploaded assets, data
-fixtures containing secrets, or generated secrets.
+Two security properties are load bearing:
+
+1. Children receive Platform's constructed allowlist environment and lifecycle scratch; never pass
+   `process.env` or a filtered copy to jq or ripgrep.
+2. Caller paths are confined and opened through `RootBoundary.openFile`; stream the returned
+   descriptor to stdin and never pass or reopen the path in a child.
+
+Keep regression coverage for `env`/`$ENV`, jq module directives, traversal/symlink escapes,
+descriptor replacement races, output/time/queue bounds, representative large files, and the
+Hackathon benchmark fixture.
+
+Before contributing, run the full validation sequence in the README. Never commit credentials,
+tenant/subscription identifiers, private data, generated secrets, local `.env` files, or operator
+deployment state.
